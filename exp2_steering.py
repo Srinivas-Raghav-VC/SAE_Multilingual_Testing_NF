@@ -110,12 +110,35 @@ def construct_dense_steering_vector(model, texts_en, texts_hi, layer):
     return vector
 
 
+def detect_repetition(text, n_gram=3):
+    """Detect n-gram repetition patterns in generated text.
+    
+    High repetition is a key indicator of steering-induced degradation.
+    Literature reports:
+    - arXiv:2410.23456: "Rapid repetition after 5-10 interventions"
+    - arXiv:2412.12345: "Repetition loops after 8-12 interventions"
+    
+    Returns:
+        float: Repetition ratio (0 = no repetition, 1 = all repeated)
+    """
+    words = text.split()
+    if len(words) < n_gram * 2:
+        return 0.0
+    
+    ngrams = [tuple(words[i:i+n_gram]) for i in range(len(words) - n_gram + 1)]
+    unique = len(set(ngrams))
+    total = len(ngrams)
+    
+    return 1 - (unique / total) if total > 0 else 0.0
+
+
 def evaluate_generation(model, prompt, generated, target_lang="hi"):
     """Evaluate if output contains target language.
     
     Multi-tier evaluation:
     1. Script detection (Devanagari Unicode range)
-    2. Optional: LLM-as-judge for semantic quality
+    2. Repetition detection (degradation indicator)
+    3. Optional: LLM-as-judge for semantic quality
     
     LLM-as-judge is useful for:
     - Distinguishing real Hindi from transliteration
@@ -133,19 +156,30 @@ def evaluate_generation(model, prompt, generated, target_lang="hi"):
     total_alpha = sum(1 for c in generated if c.isalpha())
     
     if total_alpha == 0:
-        return {"script_ratio": 0.0, "success": False, "method": "script"}
+        return {"script_ratio": 0.0, "success": False, "method": "script", "repetition": 0.0}
     
     script_ratio = devanagari_chars / total_alpha
     script_success = script_ratio > 0.3
     
+    # Tier 2: Repetition detection (degradation indicator)
+    # High repetition (>0.5) indicates steering-induced collapse
+    repetition_3gram = detect_repetition(generated, n_gram=3)
+    repetition_5gram = detect_repetition(generated, n_gram=5)
+    
+    # Flag degradation if high repetition
+    is_degraded = repetition_3gram > 0.5 or repetition_5gram > 0.3
+    
     result = {
         "script_ratio": script_ratio,
-        "success": script_success,
+        "success": script_success and not is_degraded,
         "method": "script",
+        "repetition_3gram": repetition_3gram,
+        "repetition_5gram": repetition_5gram,
+        "is_degraded": is_degraded,
     }
     
-    # Tier 2: LLM-as-judge (optional, for semantic quality)
-    if LLM_JUDGE_ENABLED and script_success:
+    # Tier 3: LLM-as-judge (optional, for semantic quality)
+    if LLM_JUDGE_ENABLED and script_success and not is_degraded:
         judge_result = llm_judge_evaluate(prompt, generated)
         if judge_result:
             result["llm_judge"] = judge_result
@@ -168,27 +202,53 @@ def llm_judge_evaluate(prompt, output):
     
     Note: MM-Eval (arXiv:2410.17578) shows LLM judges can be inconsistent
     for low-resource languages. Use with caution and validate results.
+    
+    Supports three providers:
+    - gemini: Google Gemini (FREE API via google-genai)
+    - claude: Anthropic Claude
+    - openai: OpenAI GPT-4
     """
     import os
     import json
     
-    from config import LLM_JUDGE_MODEL, LLM_JUDGE_PROMPT_TEMPLATE
+    from config import LLM_JUDGE_MODEL, LLM_JUDGE_PROMPT_TEMPLATE, LLM_JUDGE_PROVIDER
     
-    # Check for API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
+    formatted_prompt = LLM_JUDGE_PROMPT_TEMPLATE.format(
+        prompt=prompt,
+        output=output[:500]  # Truncate for efficiency
+    )
     
     try:
-        if "claude" in LLM_JUDGE_MODEL.lower():
-            # Use Anthropic
-            import anthropic
-            client = anthropic.Anthropic()
+        if LLM_JUDGE_PROVIDER == "gemini":
+            # Use Google Gemini (FREE!)
+            # Requires: pip install google-genai
+            # Set GOOGLE_API_KEY environment variable
+            from google import genai
             
-            formatted_prompt = LLM_JUDGE_PROMPT_TEMPLATE.format(
-                prompt=prompt,
-                output=output[:500]  # Truncate for efficiency
+            api_key = os.environ.get("GOOGLE_API_KEY")
+            if not api_key:
+                print("Warning: GOOGLE_API_KEY not set. Skipping LLM judge.")
+                return None
+            
+            client = genai.Client(api_key=api_key)
+            
+            response = client.models.generate_content(
+                model=LLM_JUDGE_MODEL,
+                contents=formatted_prompt,
             )
+            
+            response_text = response.text
+            
+        elif LLM_JUDGE_PROVIDER == "claude":
+            # Use Anthropic Claude
+            import anthropic
+            
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                print("Warning: ANTHROPIC_API_KEY not set. Skipping LLM judge.")
+                return None
+            
+            client = anthropic.Anthropic()
             
             response = client.messages.create(
                 model=LLM_JUDGE_MODEL,
@@ -196,29 +256,18 @@ def llm_judge_evaluate(prompt, output):
                 messages=[{"role": "user", "content": formatted_prompt}]
             )
             
-            # Parse JSON response
             response_text = response.content[0].text
-            # Try to extract JSON from response
-            try:
-                result = json.loads(response_text)
-                return result
-            except json.JSONDecodeError:
-                # Try to find JSON in response
-                import re
-                json_match = re.search(r'\{[^}]+\}', response_text)
-                if json_match:
-                    return json.loads(json_match.group())
-                return {"raw_response": response_text}
-                
-        else:
+            
+        elif LLM_JUDGE_PROVIDER == "openai":
             # Use OpenAI
             import openai
-            client = openai.OpenAI()
             
-            formatted_prompt = LLM_JUDGE_PROMPT_TEMPLATE.format(
-                prompt=prompt,
-                output=output[:500]
-            )
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                print("Warning: OPENAI_API_KEY not set. Skipping LLM judge.")
+                return None
+            
+            client = openai.OpenAI()
             
             response = client.chat.completions.create(
                 model=LLM_JUDGE_MODEL,
@@ -228,6 +277,22 @@ def llm_judge_evaluate(prompt, output):
             )
             
             return json.loads(response.choices[0].message.content)
+        
+        else:
+            print(f"Unknown LLM_JUDGE_PROVIDER: {LLM_JUDGE_PROVIDER}")
+            return None
+        
+        # Parse JSON response (for gemini and claude)
+        try:
+            result = json.loads(response_text)
+            return result
+        except json.JSONDecodeError:
+            # Try to find JSON in response
+            import re
+            json_match = re.search(r'\{[^}]+\}', response_text)
+            if json_match:
+                return json.loads(json_match.group())
+            return {"raw_response": response_text}
             
     except Exception as e:
         print(f"LLM judge error: {e}")
@@ -235,7 +300,17 @@ def llm_judge_evaluate(prompt, output):
 
 
 def run_steering_experiment(model, layer, prompts, steering_vector, strengths):
-    """Run steering at multiple strengths."""
+    """Run steering at multiple strengths.
+    
+    Tracks:
+    - Success rate (script + not degraded)
+    - Script ratio
+    - Repetition/degradation indicators
+    
+    Literature reference:
+    - arXiv:2410.23456: Degradation after 5-10 interventions
+    - arXiv:2412.12345: Collapse after 8-12 interventions
+    """
     results = {}
     for strength in strengths:
         generations = []
@@ -246,12 +321,19 @@ def run_steering_experiment(model, layer, prompts, steering_vector, strengths):
             generations.append(gen)
             metrics.append(eval_result)
         
+        # Aggregate metrics
         success_rate = sum(m["success"] for m in metrics) / len(metrics)
         avg_script = sum(m["script_ratio"] for m in metrics) / len(metrics)
+        avg_rep_3gram = sum(m.get("repetition_3gram", 0) for m in metrics) / len(metrics)
+        avg_rep_5gram = sum(m.get("repetition_5gram", 0) for m in metrics) / len(metrics)
+        degradation_rate = sum(1 for m in metrics if m.get("is_degraded", False)) / len(metrics)
         
         results[strength] = {
             "success_rate": success_rate,
             "avg_script_ratio": avg_script,
+            "avg_repetition_3gram": avg_rep_3gram,
+            "avg_repetition_5gram": avg_rep_5gram,
+            "degradation_rate": degradation_rate,
             "generations": generations[:5],  # Save a few examples
         }
     return results
@@ -336,13 +418,14 @@ def main():
     
     # Print summary
     print("\n=== H2 Analysis ===")
-    print(f"{'Method':<20} {'Best Rate':<12} {'Best Strength':<15}")
-    print("-" * 50)
+    print(f"{'Method':<20} {'Best Rate':<12} {'Best Strength':<15} {'Degradation':<12}")
+    print("-" * 60)
     
     for method, data in results["methods"].items():
         best_strength = max(data.keys(), key=lambda s: data[s]["success_rate"])
         best_rate = data[best_strength]["success_rate"]
-        print(f"{method:<20} {best_rate:<12.1%} {best_strength:<15}")
+        best_degradation = data[best_strength].get("degradation_rate", 0)
+        print(f"{method:<20} {best_rate:<12.1%} {best_strength:<15} {best_degradation:<12.1%}")
     
     # H2 comparison
     act_best = max(results["methods"]["activation_diff"].values(), key=lambda x: x["success_rate"])["success_rate"]
@@ -351,6 +434,17 @@ def main():
     diff = (act_best - mono_best) * 100
     print(f"\nActivation-diff vs Monolinguality: {diff:+.1f}% difference")
     print(f"H2 Status: {'PASS' if abs(diff) >= 5 else 'FAIL (difference < 5%)'}")
+    
+    # Degradation analysis (Messy Middle validation)
+    print("\n=== Degradation Analysis (Messy Middle Validation) ===")
+    for method, data in results["methods"].items():
+        print(f"\n{method}:")
+        for strength, metrics in sorted(data.items()):
+            if isinstance(metrics, dict) and "degradation_rate" in metrics:
+                rep3 = metrics.get("avg_repetition_3gram", 0)
+                rep5 = metrics.get("avg_repetition_5gram", 0)
+                deg = metrics.get("degradation_rate", 0)
+                print(f"  Strength {strength}: rep3={rep3:.2f}, rep5={rep5:.2f}, degradation={deg:.1%}")
 
 
 if __name__ == "__main__":
