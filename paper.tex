@@ -1,0 +1,296 @@
+\documentclass[11pt]{article}
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{multirow}
+\usepackage[margin=1in]{geometry}
+
+\title{Indic Language Representations and Steering in Gemma Models with Sparse Autoencoders}
+
+\author{%
+  Your Name \\
+  Your Affiliation \\
+  \texttt{email@domain}
+}
+
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Multilingual large language models (LLMs) are widely deployed in settings where language and script control matter, yet their internal multilingual representations and the effects of steering remain poorly understood, particularly for Indic languages. We study the Indic cluster (Hindi, Urdu, Bengali, Tamil, Telugu) in Gemma 2 models (2B and 9B) using Sparse Autoencoders (SAEs) trained on Gemma residual streams, following recent work on SAE-based circuit discovery in LLMs~\cite{oneill2024sparse}. Our contributions are fourfold. First, we characterize the hierarchical structure of Indic representations across layers, separating script-specific and semantic/generative features and analyzing cross-lingual overlaps (Hindi--Urdu vs.\ Hindi--English) using standard multilingual evaluation corpora such as FLORES~\cite{goyal2021flores}. Second, we systematically compare steering methods (dense, activation-difference, monolinguality, attribution-based) and layers across multiple Indic and non-Indic languages. Third, we quantify spillover and leakage: how steering one Indic language affects other Indic languages and unrelated controls (German, Arabic). Fourth, we evaluate robustness: how steering impacts degradation (repetition, coherence) and downstream QA performance (MLQA, IndicQA), using a calibrated Gemini-based LLM-as-judge alongside script and semantic metrics based on LaBSE~\cite{feng2020labse}. All experiments are implemented in a unified, open-source pipeline built around Gemma Scope SAEs and standard Indic datasets (Samanantar~\cite{ramesh2021samanantar}, FLORES-200, MLQA, IndicQA). This paper reports the methodology and experimental design in full; all numerical values are placeholders (N/A) pending the final execution of the pipeline.
+\end{abstract}
+
+\section{Introduction}
+
+Multilingual LLMs are increasingly used in multilingual societies where control over language and script is critical. In the Indic context, models must handle closely related languages (e.g., Hindi and Urdu) that share semantics but differ in script, as well as diverse scripts (Devanagari, Arabic, Bengali, Tamil, Telugu). Understanding how such models internally represent these languages, and how to steer them without catastrophic degradation, is essential both for interpretability and safety.
+
+Sparse Autoencoders (SAEs) have recently emerged as a powerful tool for interpreting LLM activations by decomposing residual stream activations into sparse, interpretable features~\cite{oneill2024sparse}. Prior work has demonstrated that some features behave as ``detectors'' (correlated with certain inputs) while others can act as ``generators'' (causally influencing outputs). However, multilingual and Indic-specific SAE analysis, especially in modern LLMs like Gemma 2, remains under-explored.
+
+We present a comprehensive study of Indic language representations and steering in Gemma 2 (2B and 9B) using SAEs from Gemma Scope. Our study focuses on four overarching themes:
+
+\begin{itemize}
+  \item \textbf{T1: Hierarchical geometry of Indic representations.} How are Indic languages represented across depth? Where do script-specific vs.\ semantic features live? How similar are Hindi--Urdu vs.\ Hindi--English?
+  \item \textbf{T2: Steering methods and layers.} Which SAE-based steering constructions (dense, activation-difference, monolinguality, attribution-based) work best, and at what layers, for Indic language control?
+  \item \textbf{T3: Spillover and leakage.} How does steering one Indic language affect other Indic languages and unrelated controls?
+  \item \textbf{T4: Robustness and task transfer.} How does steering impact degradation and downstream QA performance? Can LLM-as-judge be used reliably when calibrated~\cite{krumdick2025nofreelabels}?
+\end{itemize}
+
+We implement a unified experimental framework that operationalizes these questions as twelve core experiments (Exp1--Exp12) and generates both plots and a machine-readable summary for analysis. In this draft, all numerical results are left as \textbf{N/A} until the pipeline is fully executed.
+
+\section{Related Work}
+
+\paragraph{Multilingual representations and Indic languages.} 
+Prior work has examined how multilingual transformers develop cross-lingual concept spaces, often finding shared mid-layer representations with language-specific decoding in later layers. FLORES-101 and FLORES-200 have become standard multilingual benchmarks for evaluating translation and representation quality across many languages, including low-resource ones~\cite{goyal2021flores}. Studies on Indic languages and Hindi--Urdu suggest script-specific clustering atop shared semantics. Our work builds on this by using SAEs to decompose Gemma residual streams into sparse features and explicitly separating script vs.\ semantic components.
+
+\paragraph{Sparse Autoencoders and steering.}
+Recent SAE work has shown that language models' residual streams can be decomposed into features that track concepts, syntax, and other interpretable structures~\cite{oneill2024sparse}. Steering via SAE features and dense activation vectors has been explored, but typically in monolingual or English-centric contexts. Our study extends these ideas to a structured, multi-language Indic setting.
+
+\paragraph{LLM-as-judge and calibration.}
+LLM-as-judge methods use large models to evaluate generated text. Recent papers show strong correlation with human judgements but also highlight significant biases and the need for calibration or human grounding~\cite{krumdick2025nofreelabels}. We adopt a calibration approach inspired by this line of work, estimating bias-corrected accuracy and confidence intervals for a Gemini-based judge.
+
+\paragraph{Indic corpora.}
+Samanantar~\cite{ramesh2021samanantar} is, to our knowledge, the largest publicly available EN--Indic parallel corpus, spanning 11 Indic languages and widely used for multilingual translation and representation learning. FLORES-101 and FLORES-200~\cite{goyal2021flores} provide high-quality parallel evaluation data for a large number of languages, including many Indic languages. We use Samanantar primarily for feature discovery and steering vector estimation, and FLORES for parallel evaluation and cross-lingual analysis.
+
+\section{Background and Hypotheses}
+
+We consider a transformer LLM with $L$ layers and hidden dimension $d$, augmented with SAEs trained on residual stream activations for each layer. Each SAE encodes a hidden state $h \in \mathbb{R}^d$ into sparse features $z \in \mathbb{R}^m$ and reconstructs back to $\hat{h} \in \mathbb{R}^d$.
+
+We study the following grouped hypotheses:
+
+\subsection{T1: Hierarchical Geometry of Indic Representations}
+
+\begin{itemize}
+  \item \textbf{H1: Hindi-specific detector features exist at multiple layers.} There are at least a threshold number of Hindi-specific features (monolinguality $M > 3$) per layer.
+  \item \textbf{H2: Mid-layers form a shared cross-lingual space.} Shared features across languages peak in mid-layers, consistent with a ``messy middle'' concept space.
+  \item \textbf{H3: Hindi--Urdu share more semantic features than Hindi--English.} Jaccard overlap of active features is higher for Hindi--Urdu than for Hindi--English at most layers.
+  \item \textbf{H4: Script-specific features form a minority of Hindi--Urdu union.} Script-only features make up less than a given fraction (e.g., $< 20\%$) of the joint feature set.
+\end{itemize}
+
+\subsection{T2: Steering Methods and Layers}
+
+\begin{itemize}
+  \item \textbf{H5: Activation-difference SAE steering outperforms monolinguality.} For EN$\to$Indic steering, activation-difference SAE features yield higher target-language success than monolinguality-selected features.
+  \item \textbf{H6: There exist optimal steering layers for each Indic language.} A subset of layers (often late) yield significantly higher steering success with lower degradation.
+  \item \textbf{H7: Attribution-based steering improves over naive activation-diff.} Feature sets selected via occlusion-based attribution yield better steering than purely activation-difference sets.
+\end{itemize}
+
+\subsection{T3: Spillover and Leakage}
+
+\begin{itemize}
+  \item \textbf{H8: Steering a target Indic language primarily affects the Indic cluster.} EN$\to$Hindi steering increases Hindi usage and also affects other Indic languages more than non-Indic controls.
+  \item \textbf{H9: Steering profile similarity is higher within the Indic cluster.} Layer-wise steering success curves are more correlated among Indic languages than between Indic and non-Indic languages.
+\end{itemize}
+
+\subsection{T4: Robustness and Task Transfer}
+
+\begin{itemize}
+  \item \textbf{H10: Steering induces measurable degradation.} Strong steering increases repetition and coherence degradation.
+  \item \textbf{H11: Steering harms downstream QA performance.} Applying EN$\to$Indic steering during QA reduces QA quality (MLQA, IndicQA) relative to baseline.
+  \item \textbf{H12: Calibrated LLM-as-judge yields more reliable estimates than raw scores.} Bias-corrected estimates differ from raw Gemini judge accuracy and provide tighter error bounds~\cite{krumdick2025nofreelabels}.
+\end{itemize}
+
+\section{Experimental Setup}
+
+\subsection{Models and SAEs}
+
+We primarily use Gemma 2B and optionally Gemma 2 9B:
+\begin{itemize}
+  \item \textbf{Gemma 2 2B}: $L = 26$ layers, $d = 2304$.
+  \item \textbf{Gemma 2 9B}: larger model with corresponding Gemma Scope SAEs.
+\end{itemize}
+
+SAEs are loaded from Gemma Scope releases and attached to residual streams at selected layers (e.g., 5, 8, 10, 13, 16, 20, 24). For each layer, the SAE has width $m = 16384$ features (width 16k), similar in spirit to SAE configurations used in prior circuit-identification work~\cite{oneill2024sparse}.
+
+\subsection{Datasets}
+
+\paragraph{Samanantar.}
+We use the Samanantar EN--Indic parallel corpus~\cite{ramesh2021samanantar} for feature discovery and steering vector estimation, sampling up to $N_\text{train}$ sentence pairs per language. Indic languages include Hindi, Bengali, Tamil, Telugu; English serves as a pivot.
+
+\paragraph{FLORES-200.}
+FLORES-200 is a multilingual evaluation benchmark~\cite{goyal2021flores} that provides high-quality parallel data for 100+ languages. We use it for:
+\begin{itemize}
+  \item Cross-language feature overlap and hierarchy (Exp3, Exp5, Exp6).
+  \item Additional training data for languages not present in Samanantar (e.g., Urdu, German, Arabic).
+\end{itemize}
+
+\paragraph{MLQA and IndicQA.}
+For downstream QA evaluation:
+\begin{itemize}
+  \item \textbf{MLQA}: EN, HI, DE, AR.
+  \item \textbf{IndicQA}: HI, BN, TA, TE.
+\end{itemize}
+We use these for baseline vs.\ steered QA comparison (Exp12).
+
+\subsection{Evaluation Metrics}
+
+\paragraph{Script detection and code-mixing.}
+We compute per-script ratios over alphabetic characters using Unicode ranges (Latin, Devanagari, Arabic, Bengali, Tamil, Telugu, etc.). A generation is classified as target script if:
+\begin{enumerate}
+  \item Target script ratio $\geq \tau_\text{script}$, and
+  \item Target script ratio exceeds the next-largest script ratio by a dominance margin.
+\end{enumerate}
+We also detect code-mixing by checking if multiple scripts exceed a small threshold.
+
+\paragraph{Semantic similarity (LaBSE).}
+We use the LaBSE model~\cite{feng2020labse} to embed prompts or gold answers and generated outputs, computing cosine similarity. This is used both for steering prompts and QA answers.
+
+\paragraph{Degradation (repetition).}
+We compute 3-gram and 5-gram repetition ratios and classify outputs as degraded if either exceeds predefined thresholds.
+
+\paragraph{LLM-as-judge (Gemini).}
+We use a Gemini model as a judge with a structured rubric (language, faithfulness, coherence). Raw scores are then calibrated using a bias-correction framework inspired by recent work on limitations of LLM-as-a-judge~\cite{krumdick2025nofreelabels}, estimating sensitivity, specificity, and bias-adjusted accuracy with confidence intervals.
+
+\section{Experiments}
+
+In this draft, all numerical results are placeholders (N/A). The codebase provides a unified runner (\texttt{run.py}) and a summarizer (\texttt{summarize\_results.py}). Executing:
+\begin{verbatim}
+python run.py --all
+python summarize_results.py
+\end{verbatim}
+will generate JSON outputs, plots, and a text summary to populate the results below.
+
+\subsection{Exp1: Feature Discovery (Monolinguality)}
+
+\textbf{Goal.} Identify language-specific detector features by computing monolinguality scores per SAE feature and language.
+
+\textbf{Method.} For each target layer and language, we estimate activation rates $P(\text{feature} \mid \text{language})$ over Samanantar/FLORES samples and compute monolinguality $M = P_L / \max_{L' \neq L} P_{L'}$.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Hindi-specific features (M $>3$) per layer: \textbf{N/A}.
+  \item Dead features per language per layer: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp3: Hindi--Urdu Overlap (Correct Jaccard)}
+
+\textbf{Goal.} Quantify overlap between Hindi and Urdu features and separate script vs.\ semantic features.
+
+\textbf{Method.} For each layer, we collect active features for HI, UR, EN on FLORES and compute Jaccard overlaps and script/semantic ratios using consistent thresholds.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item J(HI,UR) per layer: \textbf{N/A}.
+  \item J(HI,EN) per layer: \textbf{N/A}.
+  \item Semantic fraction of HI--UR union: \textbf{N/A}.
+  \item Script-specific fraction of HI--UR union: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp5 \& Exp6: Hierarchical and Script vs Semantic Structure}
+
+\textbf{Goal.} Analyze shared vs Indic-only vs script/semantic features across layers, and cluster Indic vs non-Indic languages.
+
+\textbf{Method.} We compute per-language feature sets, overlaps, Indic-only sets, and classify features as script-only or semantic (Exp6), summarizing early, mid, late bands.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Shared feature counts: \textbf{N/A}.
+  \item Indic-only feature counts: \textbf{N/A}.
+  \item Early/mid/late Hindi--Urdu overlap averages: \textbf{N/A}.
+  \item Script-only vs semantic feature counts per layer: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp2, Exp7, Exp9, Exp10: Steering Methods and Layers}
+
+\textbf{Goal.} Compare steering methods (dense, activation-diff SAE, monolinguality SAE, random, attribution-based) across layers and languages.
+
+\textbf{Method.}
+\begin{itemize}
+  \item \textbf{Exp2:} Compare methods at selected layers (e.g., 5, 13, 20, 24) for EN$\to$HI steering.
+  \item \textbf{Exp7:} Probe individual SAE features by steering them up/down and measuring changes in script ratio, semantic similarity, and degradation.
+  \item \textbf{Exp9:} Full layer $\times$ method $\times$ language sweep (HI, BN, TA, TE, UR, DE, AR), evaluating multiple strengths and aggregating script, semantics, degradation, and LLM-judge scores.
+  \item \textbf{Exp10:} Use occlusion attribution to identify causally important features and build an attribution-based steering vector, comparing it to dense and activation-diff vectors.
+\end{itemize}
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Best success (script+semantic) per language and method, with layer and strength: \textbf{N/A}.
+  \item Attribution vs activation-diff vs dense steering metrics (success \%, degradation \%): \textbf{N/A}.
+  \item Distribution of feature-level causal effects (Exp7): \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp4: Spillover Analysis}
+
+\textbf{Goal.} Measure spillover: how EN$\to$Hindi steering affects other Indic languages vs non-Indic controls.
+
+\textbf{Method.} Apply a Hindi steering vector and classify outputs by script/language, measuring probabilities of outputs in HI, UR, BN, TA, TE, DE, AR.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Spillover rates to each language under Hindi steering: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp8: Scaling to 9B and Low-Resource Languages}
+
+\textbf{Goal.} Compare 2B vs 9B representations and simple EN$\to$HI steering, including low-resource Indic and non-Indic languages.
+
+\textbf{Method.} Compute active feature counts per language and layer, and evaluate dense vs SAE steering on a small set of prompts for EN$\to$HI.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Feature coverage for 2B vs 9B per language and layer: \textbf{N/A}.
+  \item EN$\to$HI success and degradation for 2B vs 9B layers: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp11: Calibrated LLM-as-Judge}
+
+\textbf{Goal.} Calibrate a Gemini-based judge for multilingual steering evaluation.
+
+\textbf{Method.} Use a calibration set with ground-truth labels; estimate sensitivity, specificity, and bias-corrected accuracy with CIs as in recent LLM-as-judge analyses~\cite{krumdick2025nofreelabels}.
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item Raw judge accuracy per language: \textbf{N/A}.
+  \item Bias-corrected accuracy and 95\% CI per language: \textbf{N/A}.
+\end{itemize}
+
+\subsection{Exp12: QA Degradation Under Steering}
+
+\textbf{Goal.} Quantify how EN$\to$target steering affects QA performance on MLQA and IndicQA.
+
+\textbf{Method.} For each target language (HI, DE, AR; HI, BN, TA, TE), we:
+\begin{itemize}
+  \item Use Exp9 results to pick best steering layer, strength, and method.
+  \item Generate baseline and steered answers for MLQA/IndicQA questions.
+  \item Evaluate script dominance, LaBSE similarity to gold answers, degradation, and LLM-judge scores.
+\end{itemize}
+
+\textbf{Results (placeholder).}
+\begin{itemize}
+  \item MLQA/IndicQA baseline vs steered script success, semantic similarity, and degradation per language: \textbf{N/A}.
+\end{itemize}
+
+\section{Discussion}
+
+In this draft, we have described a comprehensive experimental framework for analyzing Indic language representations and steering in Gemma models using SAEs. Once executed, this framework will support:
+
+\begin{itemize}
+  \item A hierarchical picture of where script vs semantic features and cross-lingual overlaps live.
+  \item A detailed comparison of steering methods and layers across the Indic cluster and controls.
+  \item Quantified spillover and leakage when steering a single Indic language.
+  \item A systematic assessment of steering-induced degradation, both in free-form generation and QA.
+\end{itemize}
+
+All numerical results are currently \textbf{N/A}; the next step is to execute the full pipeline (e.g., \texttt{python run.py --all} followed by \texttt{python summarize\_results.py}) and populate the tables and figures.
+
+\section{Limitations and Future Work}
+
+\begin{itemize}
+  \item \textbf{No human-annotated evaluation yet.} We rely on structural metrics, LaBSE, and a calibrated Gemini judge. Human evaluation is needed to validate conclusions.
+  \item \textbf{Single architecture.} We focus on Gemma 2 (2B, 9B). Cross-architecture comparison (e.g., LLaMA, Qwen) is left for future work.
+  \item \textbf{Single steering schedule.} We use constant-strength steering. More sophisticated schedules (e.g., decaying or token-aware) may reduce degradation.
+  \item \textbf{Partial circuit view.} While we probe individual features and do occlusion attribution at single layers, we do not yet reconstruct full multi-layer circuits.
+\end{itemize}
+
+\section{Conclusion}
+
+We have presented a unified, research-grade experimental framework for studying Indic language representations and steering in Gemma models using SAEs, covering hierarchy, steering methods and layers, spillover, and robustness. Once populated with data, this framework will support a detailed preprint on how Indic languages are encoded and controlled in Gemma, and how steering trades off control against degradation.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}
+

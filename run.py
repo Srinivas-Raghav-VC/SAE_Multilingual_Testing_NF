@@ -261,6 +261,54 @@ def run_exp12():
     exp12_main()
 
 
+def run_exp13():
+    """Run Experiment 13: Script vs Semantic Group Ablation."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 13: Group Ablation for Script vs Semantic Features")
+    print("=" * 60)
+    print("Goal: Test causal impact of script-sensitive vs script-invariant feature groups")
+    print("=" * 60 + "\n")
+
+    from experiments.exp13_script_semantic_ablation import main as exp13_main
+    exp13_main()
+
+
+def run_exp14():
+    """Run Experiment 14: Cross-Lingual Alignment (Language-Agnostic Space)."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 14: Cross-Lingual Alignment (Language-Agnostic Space)")
+    print("=" * 60)
+    print("Goal: Measure EN+Indic alignment across layers (language-agnostic region)")
+    print("=" * 60 + "\n")
+
+    from experiments.exp14_language_agnostic_space import main as exp14_main
+    exp14_main()
+
+
+def run_exp15():
+    """Run Experiment 15: Directional Symmetry of Steering."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 15: Directional Symmetry of Steering (EN↔Indic)")
+    print("=" * 60)
+    print("Goal: Compare EN→Indic vs Indic→EN steering effectiveness")
+    print("=" * 60 + "\n")
+
+    from experiments.exp15_directional_symmetry import main as exp15_main
+    exp15_main()
+
+
+def run_exp16():
+    """Run Experiment 16: Code-mix and Noise Robustness."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 16: Code-mix and Noise Robustness (EN→HI)")
+    print("=" * 60)
+    print("Goal: Test steering robustness on code-mixed and noisy prompts")
+    print("=" * 60 + "\n")
+
+    from experiments.exp16_code_mix_robustness import main as exp16_main
+    exp16_main()
+
+
 def run_all():
     """Run all core experiments sequentially, then generate plots."""
     print("\n" + "=" * 60)
@@ -280,6 +328,10 @@ def run_all():
         ("exp10_attribution_occlusion", lambda: __import__("experiments.exp10_attribution_occlusion", fromlist=["main"]).main()),
         ("exp11_judge_calibration", run_exp11),
         ("exp12_qa_degradation", run_exp12),
+        ("exp13_script_semantic_ablation", run_exp13),
+        ("exp14_language_agnostic_space", run_exp14),
+        ("exp15_directional_symmetry", run_exp15),
+        ("exp16_code_mix_robustness", run_exp16),
     ]
     
     results = {}
@@ -354,6 +406,10 @@ Examples:
     parser.add_argument("--exp10", action="store_true", help="Run exp10: Occlusion-Based Attribution Steering")
     parser.add_argument("--exp11", action="store_true", help="Run exp11: Calibrated LLM-as-Judge Evaluation")
     parser.add_argument("--exp12", action="store_true", help="Run exp12: QA Degradation Under Steering")
+    parser.add_argument("--exp13", action="store_true", help="Run exp13: Group Ablation for Script vs Semantic Features")
+    parser.add_argument("--exp14", action="store_true", help="Run exp14: Cross-Lingual Alignment (Language-Agnostic Space)")
+    parser.add_argument("--exp15", action="store_true", help="Run exp15: Directional Symmetry of Steering")
+    parser.add_argument("--exp16", action="store_true", help="Run exp16: Code-mix and Noise Robustness")
     parser.add_argument("--all", action="store_true", help="Run all experiments")
     
     args = parser.parse_args()
@@ -410,6 +466,18 @@ Examples:
     
     if args.exp12:
         run_exp12()
+    
+    if args.exp13:
+        run_exp13()
+    
+    if args.exp14:
+        run_exp14()
+
+    if args.exp15:
+        run_exp15()
+
+    if args.exp16:
+        run_exp16()
     
     if args.all:
         run_all()

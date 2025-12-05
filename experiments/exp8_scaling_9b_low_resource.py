@@ -32,6 +32,7 @@ from config import (
     MODEL_ID_9B,
     SAE_RELEASE_2B,
     SAE_RELEASE_9B,
+    EXTENDED_LANGUAGES,
 )
 from data import load_flores
 from model import GemmaWithSAE
@@ -130,16 +131,26 @@ def main():
         ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B),
     ]
 
-    # Load FLORES data once
+    # Load FLORES data once (including low-resource languages from EXTENDED_LANGUAGES)
     print("\nLoading FLORES data...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
+    flores_codes = {
+        "en": EXTENDED_LANGUAGES["en"],
+        "hi": EXTENDED_LANGUAGES["hi"],
+        "ur": EXTENDED_LANGUAGES["ur"],
+        "bn": EXTENDED_LANGUAGES["bn"],
+        "as": EXTENDED_LANGUAGES["as"],
+        "or": EXTENDED_LANGUAGES["or"],
+        "ar": EXTENDED_LANGUAGES["ar"],
+        "vi": EXTENDED_LANGUAGES["vi"],
+    }
+    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, languages=flores_codes)
 
     # Indic + low-resource-ish languages
     indic_langs = ["hi", "ur", "bn", "as", "or"]
     non_indic_low = ["ar", "vi"]  # Semitic + SE Asian
-    langs_of_interest = [l for l in indic_langs + non_indic_low if l in flores]
+    langs_of_interest = [l for l in indic_langs + non_indic_low if flores.get(l)]
 
-    texts_by_lang = {l: flores[l] for l in langs_of_interest}
+    texts_by_lang = {l: flores.get(l, []) for l in langs_of_interest}
     texts_en = flores.get("en", [])
     texts_hi = flores.get("hi", [])
 

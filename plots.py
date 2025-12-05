@@ -760,6 +760,121 @@ def plot_hierarchy_profile_similarity(results, output_dir):
     print(f"Saved: {output_path}")
 
 
+def plot_language_agnostic_alignment(results, output_dir):
+    """Figure 11: EN–Indic alignment vs layer (Exp14).
+
+    Uses exp14_language_agnostic_space.json to plot average cosine similarity
+    between English and each Indic language across layers.
+    """
+    if not HAS_MATPLOTLIB:
+        return
+
+    exp14 = results.get("exp14_language_agnostic_space", {})
+    if not exp14:
+        print("No exp14_language_agnostic_space results found")
+        return
+
+    layers_data = exp14.get("layers", {})
+    if not layers_data:
+        print("exp14_language_agnostic_space has no 'layers' key")
+        return
+
+    layers = sorted(int(k) for k in layers_data.keys())
+    en_hi = []
+    en_ur = []
+    en_bn = []
+    en_ta = []
+    en_te = []
+
+    for layer in layers:
+        pair = layers_data[str(layer)].get("pairwise_cosine", {})
+        en_hi.append(pair.get("en-hi", 0.0))
+        en_ur.append(pair.get("en-ur", 0.0))
+        en_bn.append(pair.get("en-bn", 0.0))
+        en_ta.append(pair.get("en-ta", 0.0))
+        en_te.append(pair.get("en-te", 0.0))
+
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    ax.plot(layers, en_hi, 'o-', label="EN–HI")
+    ax.plot(layers, en_ur, 's-', label="EN–UR")
+    ax.plot(layers, en_bn, '^-', label="EN–BN")
+    ax.plot(layers, en_ta, 'D-', label="EN–TA")
+    ax.plot(layers, en_te, 'x-', label="EN–TE")
+
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Average cosine similarity")
+    ax.set_title("Cross-Lingual Alignment vs Layer (Exp14)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    output_path = output_dir / "fig11_language_agnostic_alignment.png"
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def plot_directional_symmetry(results, output_dir):
+    """Figure 12: EN→Indic vs Indic→EN steering symmetry (Exp15)."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    exp15 = results.get("exp15_directional_symmetry", {})
+    if not exp15:
+        print("No exp15_directional_symmetry results found")
+        return
+
+    langs = sorted(exp15.keys())
+    en_to_l = [exp15[lang]["en_to_l"]["delta_success_script"] * 100 for lang in langs]
+    l_to_en = [exp15[lang]["l_to_en"]["delta_success_script"] * 100 for lang in langs]
+
+    x = np.arange(len(langs))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    ax.bar(x - width / 2, en_to_l, width, label="EN→L")
+    ax.bar(x + width / 2, l_to_en, width, label="L→EN")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(langs)
+    ax.set_ylabel("Δ Script success (%)")
+    ax.set_title("Directional Steering Symmetry (Exp15)")
+    ax.axhline(0, color="black", linewidth=0.8)
+    ax.legend()
+
+    output_path = output_dir / "fig12_directional_symmetry.png"
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def plot_code_mix_robustness(results, output_dir):
+    """Figure 13: Code-mix and noise robustness (Exp16)."""
+    if not HAS_MATPLOTLIB:
+        return
+
+    exp16 = results.get("exp16_code_mix_robustness", {})
+    if not exp16:
+        print("No exp16_code_mix_robustness results found")
+        return
+
+    conditions = ["clean_en", "en_plus_deva", "hinglish_mix"]
+    deltas = [exp16.get(c, {}).get("delta_success_script", 0.0) * 100 for c in conditions]
+
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+    x = np.arange(len(conditions))
+    ax.bar(x, deltas, color=["#2ecc71", "#3498db", "#e74c3c"])
+    ax.set_xticks(x)
+    ax.set_xticklabels(conditions, rotation=15)
+    ax.set_ylabel("Δ Script success (%)")
+    ax.set_title("Code-Mix and Noise Robustness (EN→HI, Exp16)")
+    ax.axhline(0, color="black", linewidth=0.8)
+
+    output_path = output_dir / "fig13_code_mix_robustness.png"
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
 def generate_all_plots(results_dir):
     """Generate all publication-quality plots."""
     results_dir = Path(results_dir)
@@ -785,6 +900,9 @@ def generate_all_plots(results_dir):
     plot_language_overlap_heatmaps(results, output_dir)
     plot_steering_profile_similarity(results, output_dir)
     plot_hierarchy_profile_similarity(results, output_dir)
+    plot_language_agnostic_alignment(results, output_dir)
+    plot_directional_symmetry(results, output_dir)
+    plot_code_mix_robustness(results, output_dir)
     
     print(f"\nAll figures saved to: {output_dir}")
 
