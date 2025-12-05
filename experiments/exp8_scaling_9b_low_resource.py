@@ -124,14 +124,11 @@ def main():
     print("EXPERIMENT 8: Scaling to 9B and Low-Resource Languages")
     print("=" * 60)
 
+    # Two model variants: 2B (default) and 9B (if available)
     model_variants = [
-        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID, model_id_9b := MODEL_ID_9B, sae_release=SAE_RELEASE_2B),
+        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID, sae_release=SAE_RELEASE_2B),
+        ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B),
     ]
-
-    # Add 9B if available
-    model_variants.append(
-        ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B)
-    )
 
     # Load FLORES data once
     print("\nLoading FLORES data...")
@@ -194,4 +191,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
