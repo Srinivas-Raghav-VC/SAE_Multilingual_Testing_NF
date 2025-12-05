@@ -1,103 +1,527 @@
-"""Data loading for multilingual SAE experiments.
+"""Data loading for SAE Multilingual Steering Research.
 
-UPDATED: Uses openlanguagedata/flores_plus (FLORES+ v4.2) instead of 
-deprecated facebook/flores. The new dataset is gated and requires HF login.
+Datasets:
+1. AI4Bharat Samanantar - 49.6M parallel sentences for 11 Indic languages
+2. FLORES-200 - 200 languages, smaller but high quality
+3. MLQA - Multilingual QA for evaluation (EN, HI, DE, AR, ES, VI, ZH)
+4. IndicQA - Indic-specific QA for evaluation
 
-Changes from facebook/flores:
-- Dataset ID: openlanguagedata/flores_plus
-- Column name: "text" instead of "sentence"
-- Uses ISO 639-3 + script codes (e.g., "hin_Deva", "eng_Latn")
-- Requires Hugging Face authentication (gated dataset)
+Train/Test Split Strategy:
+- Training data (feature discovery): Samanantar or FLORES train split
+- Validation data: FLORES test split or held-out
+- Evaluation data: MLQA/IndicQA (completely separate!)
 """
 
-import os
-import sys
+import random
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, Any
+from pathlib import Path
+
 from datasets import load_dataset
-from config import LANGUAGES
+
+from config import LANGUAGES, SEED, EVAL_PROMPTS
 
 
-def check_hf_login():
-    """Check if HF_TOKEN is set or user is logged in."""
-    hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if hf_token:
-        print("✓ HF_TOKEN found in environment")
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
+
+@dataclass
+class DataSplit:
+    """Container for properly split data."""
+    train: Dict[str, List[str]]           # For feature discovery
+    test: Dict[str, List[str]]            # For feature validation
+    steering_prompts: List[str]           # For steering evaluation
+    qa_eval: Optional[Dict[str, Any]] = None  # For QA evaluation
+    
+    def verify_no_leakage(self) -> bool:
+        """Verify train and test don't overlap."""
+        for lang in self.train.keys():
+            if lang not in self.test:
+                continue
+            train_set = set(self.train[lang])
+            test_set = set(self.test[lang])
+            overlap = train_set & test_set
+            if overlap:
+                print(f"WARNING: {len(overlap)} sentences overlap in {lang}!")
+                return False
         return True
-    
-    # Check for cached login
-    try:
-        from huggingface_hub import HfFolder
-        token = HfFolder.get_token()
-        if token:
-            print("✓ HF login found (cached token)")
-            return True
-    except Exception:
-        pass
-    
-    print("⚠ WARNING: No HF authentication found!")
-    print("  FLORES+ is a gated dataset requiring login.")
-    print("  Options:")
-    print("    1. export HF_TOKEN=your_token_here")
-    print("    2. huggingface-cli login")
-    print("    3. Accept terms at: https://huggingface.co/datasets/openlanguagedata/flores_plus")
-    return False
 
 
-def load_flores(split="devtest", max_samples=None):
-    """Load FLORES+ parallel sentences.
+@dataclass  
+class LanguageData:
+    """Data for a single language."""
+    code: str
+    name: str
+    script: str
+    family: str
+    sentences: List[str] = field(default_factory=list)
+
+
+# =============================================================================
+# LANGUAGE METADATA
+# =============================================================================
+
+LANGUAGE_METADATA = {
+    # Indic - Indo-Aryan
+    "hi": {"name": "Hindi", "script": "Devanagari", "family": "Indo-Aryan"},
+    "ur": {"name": "Urdu", "script": "Arabic", "family": "Indo-Aryan"},
+    "bn": {"name": "Bengali", "script": "Bengali", "family": "Indo-Aryan"},
+    "mr": {"name": "Marathi", "script": "Devanagari", "family": "Indo-Aryan"},
+    "gu": {"name": "Gujarati", "script": "Gujarati", "family": "Indo-Aryan"},
+    "pa": {"name": "Punjabi", "script": "Gurmukhi", "family": "Indo-Aryan"},
+    "or": {"name": "Odia", "script": "Odia", "family": "Indo-Aryan"},
+    "as": {"name": "Assamese", "script": "Assamese", "family": "Indo-Aryan"},
     
-    FLORES+ v4.2 (openlanguagedata/flores_plus) replaces deprecated facebook/flores.
-    This is a gated dataset - requires HF authentication.
+    # Indic - Dravidian
+    "ta": {"name": "Tamil", "script": "Tamil", "family": "Dravidian"},
+    "te": {"name": "Telugu", "script": "Telugu", "family": "Dravidian"},
+    "kn": {"name": "Kannada", "script": "Kannada", "family": "Dravidian"},
+    "ml": {"name": "Malayalam", "script": "Malayalam", "family": "Dravidian"},
+    
+    # European
+    "en": {"name": "English", "script": "Latin", "family": "Germanic"},
+    "de": {"name": "German", "script": "Latin", "family": "Germanic"},
+    "fr": {"name": "French", "script": "Latin", "family": "Romance"},
+    "es": {"name": "Spanish", "script": "Latin", "family": "Romance"},
+    
+    # Other
+    "ar": {"name": "Arabic", "script": "Arabic", "family": "Semitic"},
+    "zh": {"name": "Chinese", "script": "Han", "family": "Sino-Tibetan"},
+    "ja": {"name": "Japanese", "script": "Mixed", "family": "Japonic"},
+    "vi": {"name": "Vietnamese", "script": "Latin", "family": "Austroasiatic"},
+}
+
+
+# =============================================================================
+# FLORES-200 LOADING
+# =============================================================================
+
+def load_flores(
+    max_samples: Optional[int] = None,
+    languages: Optional[Dict[str, str]] = None,
+    split: str = "devtest"
+) -> Dict[str, List[str]]:
+    """Load FLORES-200 parallel sentences.
     
     Args:
-        split: "dev" or "devtest" (FLORES+ splits)
-        max_samples: Max sentences per language
+        max_samples: Maximum samples per language
+        languages: Dict mapping short code to FLORES code (default: from config)
+        split: Dataset split ("devtest" has ~997 sentences)
         
     Returns:
-        Dict mapping short lang code -> list of sentences
+        Dict mapping language code to list of sentences
     """
-    check_hf_login()
+    if languages is None:
+        languages = LANGUAGES
     
     data = {}
-    for short_code, flores_code in LANGUAGES.items():
+    
+    for short_code, flores_code in languages.items():
         try:
-            # FLORES+ uses language subsets (e.g., "hin_Deva")
             ds = load_dataset(
-                "openlanguagedata/flores_plus",
+                "facebook/flores",
                 flores_code,
                 split=split,
                 trust_remote_code=True
             )
-            # FLORES+ uses "text" column instead of "sentence"
-            sentences = ds["text"]
-            if max_samples:
+            sentences = list(ds["sentence"])
+            
+            if max_samples and len(sentences) > max_samples:
                 sentences = sentences[:max_samples]
+            
             data[short_code] = sentences
-            print(f"  Loaded {len(sentences)} {short_code} sentences")
+            print(f"  Loaded {short_code}: {len(sentences)} sentences")
+            
         except Exception as e:
-            print(f"  ERROR loading {short_code} ({flores_code}): {e}")
-            raise
+            print(f"  Warning: Could not load {short_code} ({flores_code}): {e}")
+            # Return empty list, don't crash
+            data[short_code] = []
     
     return data
 
 
-def load_parallel_pairs(lang1, lang2, max_samples=500):
-    """Load parallel sentence pairs for two languages.
+# =============================================================================
+# AI4BHARAT SAMANANTAR LOADING
+# =============================================================================
+
+def load_samanantar(
+    lang: str,
+    max_samples: Optional[int] = None,
+    split: str = "train"
+) -> Tuple[List[str], List[str]]:
+    """Load AI4Bharat Samanantar parallel corpus.
     
-    FLORES+ sentences are aligned by 'id' field across languages.
+    Samanantar has 49.6M sentence pairs between English and 11 Indic languages:
+    as, bn, gu, hi, kn, ml, mr, or, pa, ta, te
+    
+    Args:
+        lang: Target language code (e.g., "hi" for Hindi)
+        max_samples: Maximum samples to load
+        split: Dataset split (default "train")
+        
+    Returns:
+        Tuple of (english_sentences, target_sentences)
     """
-    flores = load_flores(max_samples=max_samples)
+    try:
+        ds = load_dataset(
+            "ai4bharat/samanantar",
+            lang,
+            split=split,
+            trust_remote_code=True
+        )
+        
+        # Samanantar has 'src' (English) and 'tgt' (target language)
+        en_sentences = list(ds["src"])
+        tgt_sentences = list(ds["tgt"])
+        
+        if max_samples and len(en_sentences) > max_samples:
+            en_sentences = en_sentences[:max_samples]
+            tgt_sentences = tgt_sentences[:max_samples]
+        
+        print(f"  Loaded Samanantar {lang}: {len(en_sentences)} pairs")
+        return en_sentences, tgt_sentences
+        
+    except Exception as e:
+        print(f"  Warning: Could not load Samanantar {lang}: {e}")
+        return [], []
+
+
+def load_samanantar_multilingual(
+    languages: List[str],
+    max_samples_per_lang: int = 5000
+) -> Dict[str, List[str]]:
+    """Load Samanantar for multiple languages.
+    
+    Args:
+        languages: List of language codes (e.g., ["hi", "bn", "ta"])
+        max_samples_per_lang: Max samples per language
+        
+    Returns:
+        Dict mapping language code to sentences
+    """
+    data = {"en": []}  # Will collect English from all pairs
+    
+    for lang in languages:
+        if lang == "en":
+            continue
+            
+        en_sents, tgt_sents = load_samanantar(lang, max_samples_per_lang)
+        
+        if tgt_sents:
+            data[lang] = tgt_sents
+            # Add English sentences (may have duplicates, that's OK)
+            data["en"].extend(en_sents)
+    
+    # Deduplicate and limit English
+    data["en"] = list(set(data["en"]))[:max_samples_per_lang]
+    print(f"  English (combined): {len(data['en'])} unique sentences")
+    
+    return data
+
+
+# =============================================================================
+# MLQA LOADING (FOR EVALUATION)
+# =============================================================================
+
+def load_mlqa(
+    languages: Optional[List[str]] = None,
+    max_samples: int = 500
+) -> Dict[str, List[Dict]]:
+    """Load MLQA question-answering dataset.
+    
+    MLQA has QA pairs in: en, ar, de, es, hi, vi, zh
+    
+    Args:
+        languages: Languages to load (default: all available)
+        max_samples: Max samples per language
+        
+    Returns:
+        Dict mapping language to list of QA examples
+    """
+    available = ["en", "ar", "de", "es", "hi", "vi", "zh"]
+    
+    if languages is None:
+        languages = available
+    else:
+        languages = [l for l in languages if l in available]
+    
+    data = {}
+    
+    for lang in languages:
+        try:
+            # MLQA uses format like "mlqa.en.en" for monolingual
+            config = f"mlqa.{lang}.{lang}"
+            ds = load_dataset("facebook/mlqa", config, split="test")
+            
+            examples = []
+            for i, item in enumerate(ds):
+                if i >= max_samples:
+                    break
+                examples.append({
+                    "id": item["id"],
+                    "context": item["context"],
+                    "question": item["question"],
+                    "answer": item["answers"]["text"][0] if item["answers"]["text"] else "",
+                })
+            
+            data[lang] = examples
+            print(f"  Loaded MLQA {lang}: {len(examples)} QA pairs")
+            
+        except Exception as e:
+            print(f"  Warning: Could not load MLQA {lang}: {e}")
+            data[lang] = []
+    
+    return data
+
+
+# =============================================================================
+# INDICQA LOADING (FOR EVALUATION)
+# =============================================================================
+
+def load_indicqa(
+    languages: Optional[List[str]] = None,
+    max_samples: int = 500
+) -> Dict[str, List[Dict]]:
+    """Load AI4Bharat IndicQA dataset.
+    
+    IndicQA has QA pairs in 11 Indic languages.
+    
+    Args:
+        languages: Languages to load
+        max_samples: Max samples per language
+        
+    Returns:
+        Dict mapping language to list of QA examples
+    """
+    available = ["as", "bn", "gu", "hi", "kn", "ml", "mr", "or", "pa", "ta", "te"]
+    
+    if languages is None:
+        languages = available
+    else:
+        languages = [l for l in languages if l in available]
+    
+    data = {}
+    
+    for lang in languages:
+        try:
+            ds = load_dataset(
+                "ai4bharat/IndicQA",
+                f"indicqa.{lang}",
+                split="test",
+                trust_remote_code=True
+            )
+            
+            examples = []
+            for i, item in enumerate(ds):
+                if i >= max_samples:
+                    break
+                examples.append({
+                    "context": item.get("context", ""),
+                    "question": item.get("question", ""),
+                    "answer": item.get("answers", {}).get("text", [""])[0],
+                })
+            
+            data[lang] = examples
+            print(f"  Loaded IndicQA {lang}: {len(examples)} QA pairs")
+            
+        except Exception as e:
+            print(f"  Warning: Could not load IndicQA {lang}: {e}")
+            data[lang] = []
+    
+    return data
+
+
+# =============================================================================
+# COMBINED DATA LOADING WITH TRAIN/TEST SPLIT
+# =============================================================================
+
+def load_research_data(
+    max_train_samples: int = 5000,
+    max_test_samples: int = 1000,
+    max_eval_samples: int = 500,
+    use_samanantar: bool = True,
+    seed: int = SEED
+) -> DataSplit:
+    """Load complete research dataset with proper splits.
+    
+    Strategy:
+    - Training: Samanantar (large) or FLORES (train portion)
+    - Validation: FLORES (test portion) 
+    - Evaluation: MLQA + steering prompts (completely separate!)
+    
+    Args:
+        max_train_samples: Max samples for training per language
+        max_test_samples: Max samples for testing per language
+        max_eval_samples: Max samples for evaluation per language
+        use_samanantar: Use Samanantar for training (recommended)
+        seed: Random seed
+        
+    Returns:
+        DataSplit with train, test, steering_prompts, qa_eval
+    """
+    random.seed(seed)
+    
+    print("\n" + "=" * 60)
+    print("LOADING RESEARCH DATA")
+    print("=" * 60)
+    
+    # Languages for different purposes
+    indic_langs = ["hi", "ur", "bn", "ta", "te"]  # Core Indic
+    control_langs = ["en", "de", "ar"]  # Non-Indic controls
+    all_langs = indic_langs + control_langs
+    
+    # ----- TRAINING DATA -----
+    print("\n1. Loading TRAINING data...")
+    
+    if use_samanantar:
+        # Use Samanantar for Indic languages (much larger!)
+        samanantar_langs = ["hi", "bn", "ta", "te"]  # Samanantar languages
+        train_data = load_samanantar_multilingual(samanantar_langs, max_train_samples)
+        
+        # Add control languages from FLORES
+        flores_train = load_flores(max_train_samples, {
+            "de": "deu_Latn",
+            "ar": "arb_Arab",
+        })
+        train_data.update(flores_train)
+        
+        # Add Urdu from FLORES (not in Samanantar)
+        flores_ur = load_flores(max_train_samples, {"ur": "urd_Arab"})
+        train_data.update(flores_ur)
+    else:
+        # Use FLORES for everything (smaller but simpler)
+        flores_codes = {
+            "en": "eng_Latn",
+            "hi": "hin_Deva",
+            "ur": "urd_Arab",
+            "bn": "ben_Beng",
+            "ta": "tam_Taml",
+            "te": "tel_Telu",
+            "de": "deu_Latn",
+            "ar": "arb_Arab",
+        }
+        train_data = load_flores(max_train_samples, flores_codes)
+    
+    # ----- TEST DATA -----
+    print("\n2. Loading TEST data (validation)...")
+    
+    # Always use FLORES for test (held-out from training if using FLORES)
+    flores_codes = {
+        "en": "eng_Latn",
+        "hi": "hin_Deva",
+        "ur": "urd_Arab",
+        "bn": "ben_Beng",
+        "ta": "tam_Taml",
+        "te": "tel_Telu",
+        "de": "deu_Latn",
+        "ar": "arb_Arab",
+    }
+    test_data = load_flores(max_test_samples, flores_codes)
+    
+    # If using FLORES for both, ensure no overlap
+    if not use_samanantar:
+        # Take different slices
+        for lang in train_data:
+            if lang in test_data:
+                # First 80% for train, last 20% for test
+                all_sents = train_data[lang] + test_data[lang]
+                all_sents = list(set(all_sents))  # Dedupe
+                random.shuffle(all_sents)
+                split_idx = int(len(all_sents) * 0.8)
+                train_data[lang] = all_sents[:split_idx]
+                test_data[lang] = all_sents[split_idx:]
+    
+    # ----- EVALUATION DATA -----
+    print("\n3. Loading EVALUATION data (QA)...")
+    
+    qa_eval = {}
+    
+    # MLQA for Hindi, German, Arabic (cross-lingual comparison)
+    mlqa_data = load_mlqa(["en", "hi", "de", "ar"], max_eval_samples)
+    qa_eval["mlqa"] = mlqa_data
+    
+    # IndicQA for more Indic languages
+    indicqa_data = load_indicqa(["hi", "bn", "ta", "te"], max_eval_samples)
+    qa_eval["indicqa"] = indicqa_data
+    
+    # ----- STEERING PROMPTS -----
+    print("\n4. Loading steering prompts...")
+    steering_prompts = EVAL_PROMPTS.copy()
+    print(f"  {len(steering_prompts)} steering prompts")
+    
+    # ----- CREATE DATASPLIT -----
+    data_split = DataSplit(
+        train=train_data,
+        test=test_data,
+        steering_prompts=steering_prompts,
+        qa_eval=qa_eval
+    )
+    
+    # ----- VERIFY -----
+    print("\n5. Verifying data integrity...")
+    if data_split.verify_no_leakage():
+        print("  ✓ No data leakage detected")
+    else:
+        print("  ✗ WARNING: Potential data leakage!")
+    
+    # ----- SUMMARY -----
+    print("\n" + "=" * 60)
+    print("DATA SUMMARY")
+    print("=" * 60)
+    print(f"Training languages: {list(train_data.keys())}")
+    print(f"Test languages: {list(test_data.keys())}")
+    for lang in train_data:
+        train_n = len(train_data.get(lang, []))
+        test_n = len(test_data.get(lang, []))
+        print(f"  {lang}: {train_n} train, {test_n} test")
+    print(f"MLQA evaluation: {list(qa_eval.get('mlqa', {}).keys())}")
+    print(f"IndicQA evaluation: {list(qa_eval.get('indicqa', {}).keys())}")
+    print("=" * 60)
+    
+    return data_split
+
+
+# =============================================================================
+# LEGACY FUNCTIONS (for backward compatibility)
+# =============================================================================
+
+def load_parallel_pairs(
+    lang1: str,
+    lang2: str,
+    max_samples: int = 500
+) -> List[Tuple[str, str]]:
+    """Load parallel sentence pairs (legacy function)."""
+    flores = load_flores(max_samples)
+    
+    if lang1 not in flores or lang2 not in flores:
+        return []
+    
     return list(zip(flores[lang1], flores[lang2]))
 
 
+# =============================================================================
+# MAIN (TESTING)
+# =============================================================================
+
 if __name__ == "__main__":
-    print("Testing FLORES+ data loading...")
-    print("=" * 50)
+    print("Testing data loading...")
     
-    if not check_hf_login():
-        print("\nPlease authenticate before running experiments.")
-        sys.exit(1)
-    
-    print("\nLoading sample data...")
-    flores = load_flores(max_samples=3)
+    # Test basic FLORES loading
+    print("\n--- Testing FLORES ---")
+    flores = load_flores(max_samples=10)
     for lang, sents in flores.items():
-        print(f"\n{lang}: {sents[0][:60]}...")
+        if sents:
+            print(f"{lang}: {sents[0][:50]}...")
+    
+    # Test research data loading
+    print("\n--- Testing Full Research Data ---")
+    # Use smaller samples for testing
+    data = load_research_data(
+        max_train_samples=100,
+        max_test_samples=20,
+        max_eval_samples=10,
+        use_samanantar=False  # Use FLORES for quick test
+    )
+    
+    print("\nTest passed!")

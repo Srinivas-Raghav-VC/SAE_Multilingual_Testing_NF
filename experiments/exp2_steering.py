@@ -111,127 +111,16 @@ def construct_dense_steering_vector(model, texts_en, texts_hi, layer):
 
 
 def evaluate_generation(model, prompt, generated, target_lang="hi"):
-    """Evaluate if output contains target language.
-    
-    Multi-tier evaluation:
-    1. Script detection (Devanagari Unicode range)
-    2. Optional: LLM-as-judge for semantic quality
-    
-    LLM-as-judge is useful for:
-    - Distinguishing real Hindi from transliteration
-    - Detecting grammatical Hindi vs gibberish
-    - Semantic vs syntactic language identification
-    
-    Reference: MM-Eval (arXiv:2410.17578) shows LLM judges need careful
-    calibration for non-English languages.
-    """
-    from config import LLM_JUDGE_ENABLED
-    
-    # Tier 1: Script detection (fast, deterministic)
+    """Simple evaluation: check if output contains target script."""
     # Devanagari Unicode range: 0x0900-0x097F
     devanagari_chars = sum(1 for c in generated if 0x0900 <= ord(c) <= 0x097F)
     total_alpha = sum(1 for c in generated if c.isalpha())
     
     if total_alpha == 0:
-        return {"script_ratio": 0.0, "success": False, "method": "script"}
+        return {"script_ratio": 0.0, "success": False}
     
-    script_ratio = devanagari_chars / total_alpha
-    script_success = script_ratio > 0.3
-    
-    result = {
-        "script_ratio": script_ratio,
-        "success": script_success,
-        "method": "script",
-    }
-    
-    # Tier 2: LLM-as-judge (optional, for semantic quality)
-    if LLM_JUDGE_ENABLED and script_success:
-        judge_result = llm_judge_evaluate(prompt, generated)
-        if judge_result:
-            result["llm_judge"] = judge_result
-            # Override success if semantic check fails
-            if judge_result.get("semantic") == "No":
-                result["success"] = False
-                result["method"] = "llm_judge"
-    
-    return result
-
-
-def llm_judge_evaluate(prompt, output):
-    """Use LLM-as-judge for semantic language evaluation.
-    
-    This is useful for tie-breaking when script detection is ambiguous,
-    or for detecting:
-    - Romanized Hindi (Hinglish) vs actual Hindi
-    - Grammatical Hindi vs repetitive/broken text
-    - Semantic coherence vs script-only matching
-    
-    Note: MM-Eval (arXiv:2410.17578) shows LLM judges can be inconsistent
-    for low-resource languages. Use with caution and validate results.
-    """
-    import os
-    import json
-    
-    from config import LLM_JUDGE_MODEL, LLM_JUDGE_PROMPT_TEMPLATE
-    
-    # Check for API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    
-    try:
-        if "claude" in LLM_JUDGE_MODEL.lower():
-            # Use Anthropic
-            import anthropic
-            client = anthropic.Anthropic()
-            
-            formatted_prompt = LLM_JUDGE_PROMPT_TEMPLATE.format(
-                prompt=prompt,
-                output=output[:500]  # Truncate for efficiency
-            )
-            
-            response = client.messages.create(
-                model=LLM_JUDGE_MODEL,
-                max_tokens=200,
-                messages=[{"role": "user", "content": formatted_prompt}]
-            )
-            
-            # Parse JSON response
-            response_text = response.content[0].text
-            # Try to extract JSON from response
-            try:
-                result = json.loads(response_text)
-                return result
-            except json.JSONDecodeError:
-                # Try to find JSON in response
-                import re
-                json_match = re.search(r'\{[^}]+\}', response_text)
-                if json_match:
-                    return json.loads(json_match.group())
-                return {"raw_response": response_text}
-                
-        else:
-            # Use OpenAI
-            import openai
-            client = openai.OpenAI()
-            
-            formatted_prompt = LLM_JUDGE_PROMPT_TEMPLATE.format(
-                prompt=prompt,
-                output=output[:500]
-            )
-            
-            response = client.chat.completions.create(
-                model=LLM_JUDGE_MODEL,
-                messages=[{"role": "user", "content": formatted_prompt}],
-                max_tokens=200,
-                response_format={"type": "json_object"}
-            )
-            
-            return json.loads(response.choices[0].message.content)
-            
-    except Exception as e:
-        print(f"LLM judge error: {e}")
-        return None
+    ratio = devanagari_chars / total_alpha
+    return {"script_ratio": ratio, "success": ratio > 0.3}
 
 
 def run_steering_experiment(model, layer, prompts, steering_vector, strengths):

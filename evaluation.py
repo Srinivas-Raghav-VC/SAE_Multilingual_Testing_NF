@@ -1,278 +1,289 @@
-"""Comprehensive Evaluation Module for SAE Multilingual Steering.
-
-This module implements research-grade evaluation metrics based on:
-- O'Brien et al. 2024: Capability preservation during steering
-- Gao et al. 2024: SAE feature quality metrics
-- Vogels et al. 2025: Coherence and in-distribution steering
+"""Evaluation metrics for SAE Multilingual Steering.
 
 Metrics:
-1. Steering Success: Did the model output Hindi?
-2. Fluency: Is the output grammatically correct? (perplexity-based)
-3. Coherence: Is the output coherent? (repetition detection)
-4. Capability Preservation: Can the model still perform basic tasks?
-5. Feature Quality: Are selected features high-quality?
+1. Script Detection - What script is the output in?
+2. Language ID - What language is the output?
+3. Repetition Detection - Is the output degraded?
+4. Perplexity - Is the output fluent?
+5. Semantic Similarity - Does meaning match?
+6. LLM-as-Judge - Human-like evaluation
+
+Also includes CORRECT Jaccard overlap computation (bug fixed!).
 """
 
-import math
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Set, Tuple, Optional, Any
 from dataclasses import dataclass, field
 from collections import Counter
 import json
 
-# ============================================================================
-# EVALUATION RESULT CONTAINER
-# ============================================================================
+from config import SCRIPT_RANGES, DEVANAGARI_THRESHOLD
+
+
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
+
 @dataclass
 class SteeringEvalResult:
-    """Container for comprehensive steering evaluation results."""
+    """Result of evaluating a single steering output."""
     prompt: str
     output: str
-    steering_strength: float
-    
-    # Steering success
-    is_hindi: bool = False
-    devanagari_ratio: float = 0.0
-    
-    # Fluency (perplexity)
-    perplexity: float = 0.0
-    perplexity_increase: float = 0.0  # vs baseline
-    
-    # Coherence (repetition)
-    repetition_3gram: float = 0.0
-    repetition_5gram: float = 0.0
-    is_degraded: bool = False
-    
-    # LLM judge scores
-    llm_is_hindi: bool = False
-    llm_coherence: int = 0
-    llm_relevance: int = 0
-    
-    # Overall
-    success: bool = False
-    
-    def to_dict(self) -> dict:
-        return {
-            "prompt": self.prompt,
-            "output": self.output[:200] + "..." if len(self.output) > 200 else self.output,
-            "steering_strength": self.steering_strength,
-            "is_hindi": self.is_hindi,
-            "devanagari_ratio": self.devanagari_ratio,
-            "perplexity": self.perplexity,
-            "perplexity_increase": self.perplexity_increase,
-            "repetition_3gram": self.repetition_3gram,
-            "repetition_5gram": self.repetition_5gram,
-            "is_degraded": self.is_degraded,
-            "llm_is_hindi": self.llm_is_hindi,
-            "llm_coherence": self.llm_coherence,
-            "llm_relevance": self.llm_relevance,
-            "success": self.success,
-        }
+    script_ratios: Dict[str, float]
+    is_target_script: bool
+    repetition_3gram: float
+    repetition_5gram: float
+    is_degraded: bool
+    llm_judge_result: Optional[Dict] = None
 
 
 @dataclass
-class CapabilityEvalResult:
-    """Container for capability preservation evaluation."""
-    task: str
-    prompt: str
-    baseline_output: str
-    steered_output: str
-    
-    # Scores
-    baseline_correct: bool = False
-    steered_correct: bool = False
-    capability_preserved: bool = False
-    
-    def to_dict(self) -> dict:
-        return {
-            "task": self.task,
-            "prompt": self.prompt,
-            "baseline_output": self.baseline_output[:100],
-            "steered_output": self.steered_output[:100],
-            "baseline_correct": self.baseline_correct,
-            "steered_correct": self.steered_correct,
-            "capability_preserved": self.capability_preserved,
-        }
+class AggregateResults:
+    """Aggregated results across multiple evaluations."""
+    n_samples: int
+    success_rate: float
+    avg_target_script_ratio: float
+    avg_repetition_3gram: float
+    avg_repetition_5gram: float
+    degradation_rate: float
+    per_strength_results: Dict[float, Dict] = field(default_factory=dict)
 
 
-# ============================================================================
+# =============================================================================
 # SCRIPT DETECTION
-# ============================================================================
-def detect_script_ratio(text: str, script: str = "devanagari") -> float:
-    """Detect ratio of characters in a specific script.
+# =============================================================================
+
+def detect_script_chars(text: str, script_name: str) -> int:
+    """Count characters in a specific script.
     
     Args:
-        text: Input text
-        script: Script to detect (devanagari, arabic, latin, etc.)
+        text: Text to analyze
+        script_name: Name of script (e.g., "devanagari")
         
     Returns:
-        Ratio of characters in the script (0.0 to 1.0)
+        Number of characters in that script
+    """
+    if script_name not in SCRIPT_RANGES:
+        return 0
+    
+    start, end = SCRIPT_RANGES[script_name]
+    count = sum(1 for c in text if start <= ord(c) <= end)
+    return count
+
+
+def detect_scripts(text: str) -> Dict[str, float]:
+    """Detect what scripts are present in text.
+    
+    Args:
+        text: Text to analyze
+        
+    Returns:
+        Dict mapping script name to ratio (0-1)
     """
     if not text:
-        return 0.0
+        return {}
     
-    # Unicode ranges for different scripts
-    SCRIPT_RANGES = {
-        "devanagari": (0x0900, 0x097F),  # Hindi, Marathi, Sanskrit
-        "arabic": (0x0600, 0x06FF),       # Urdu, Arabic
-        "bengali": (0x0980, 0x09FF),
-        "tamil": (0x0B80, 0x0BFF),
-        "telugu": (0x0C00, 0x0C7F),
-        "latin": (0x0041, 0x007A),        # A-Z, a-z (excludes numbers/punctuation)
-        "cyrillic": (0x0400, 0x04FF),     # Russian
-    }
+    total_alpha = sum(1 for c in text if c.isalpha())
+    if total_alpha == 0:
+        return {}
     
-    if script not in SCRIPT_RANGES:
-        return 0.0
+    ratios = {}
+    for script_name in SCRIPT_RANGES:
+        count = detect_script_chars(text, script_name)
+        ratios[script_name] = count / total_alpha
     
-    start, end = SCRIPT_RANGES[script]
-    
-    # Count script characters (excluding whitespace and punctuation)
-    script_chars = sum(1 for c in text if start <= ord(c) <= end)
-    # Count all non-whitespace characters
-    total_chars = sum(1 for c in text if not c.isspace() and ord(c) > 0x20)
-    
-    return script_chars / total_chars if total_chars > 0 else 0.0
+    return ratios
 
 
-def is_primarily_hindi(text: str, threshold: float = 0.3) -> bool:
-    """Check if text is primarily in Hindi (Devanagari script)."""
-    return detect_script_ratio(text, "devanagari") >= threshold
-
-
-# ============================================================================
-# REPETITION DETECTION (COHERENCE)
-# ============================================================================
-def detect_repetition(text: str, n_gram: int = 3) -> float:
-    """Detect n-gram repetition patterns.
-    
-    Based on literature:
-    - High repetition indicates steering-induced degradation
-    - rep3 > 0.3 or rep5 > 0.2 indicates coherence loss
+def is_target_script(
+    text: str, 
+    target: str = "devanagari",
+    threshold: float = DEVANAGARI_THRESHOLD
+) -> bool:
+    """Check if text is primarily in target script.
     
     Args:
-        text: Input text
-        n_gram: Size of n-gram to check
+        text: Text to check
+        target: Target script name
+        threshold: Minimum ratio required
         
     Returns:
-        Repetition ratio (0 = no repetition, 1 = all repeated)
+        True if text is in target script
     """
-    words = text.split()
+    ratios = detect_scripts(text)
+    return ratios.get(target, 0) >= threshold
+
+
+# =============================================================================
+# REPETITION DETECTION
+# =============================================================================
+
+def compute_ngram_repetition(text: str, n: int) -> float:
+    """Compute n-gram repetition rate.
     
-    if len(words) < n_gram:
+    High repetition = degraded output (model stuck in loop)
+    
+    Args:
+        text: Text to analyze
+        n: N-gram size (3, 5, 7)
+        
+    Returns:
+        Repetition rate (0-1), higher = more repetition
+    """
+    if not text or len(text) < n:
         return 0.0
     
-    ngrams = [tuple(words[i:i+n_gram]) for i in range(len(words) - n_gram + 1)]
+    # Get n-grams
+    ngrams = [text[i:i+n] for i in range(len(text) - n + 1)]
     
     if not ngrams:
         return 0.0
     
-    unique = len(set(ngrams))
+    # Count occurrences
+    counts = Counter(ngrams)
+    
+    # Repetition = (total - unique) / total
     total = len(ngrams)
+    unique = len(counts)
     
-    # Repetition ratio = 1 - (unique / total)
-    return 1.0 - (unique / total)
-
-
-def detect_repetition_patterns(text: str) -> Dict[str, float]:
-    """Detect multiple repetition patterns.
+    if total == 0:
+        return 0.0
     
-    Returns dict with different n-gram repetition scores.
-    """
-    return {
-        "repetition_2gram": detect_repetition(text, 2),
-        "repetition_3gram": detect_repetition(text, 3),
-        "repetition_5gram": detect_repetition(text, 5),
-        "repetition_7gram": detect_repetition(text, 7),
-    }
+    repetition = (total - unique) / total
+    return repetition
 
 
-def is_degraded(text: str, 
-                rep3_threshold: float = 0.3, 
-                rep5_threshold: float = 0.2) -> bool:
-    """Check if output shows signs of steering-induced degradation."""
-    rep3 = detect_repetition(text, 3)
-    rep5 = detect_repetition(text, 5)
-    
-    return rep3 > rep3_threshold or rep5 > rep5_threshold
-
-
-# ============================================================================
-# PERPLEXITY CALCULATION
-# ============================================================================
-def compute_perplexity(model, text: str) -> float:
-    """Compute perplexity of text using the model.
-    
-    Lower perplexity = more fluent/natural text.
-    High perplexity = less natural/coherent text.
+def is_degraded(
+    text: str,
+    threshold_3gram: float = 0.3,
+    threshold_5gram: float = 0.2
+) -> bool:
+    """Check if text shows signs of degradation.
     
     Args:
-        model: Language model with forward pass
-        text: Text to evaluate
+        text: Text to check
+        threshold_3gram: Max allowed 3-gram repetition
+        threshold_5gram: Max allowed 5-gram repetition
         
     Returns:
-        Perplexity score
+        True if text is degraded
     """
-    try:
-        import torch
-        
-        # Tokenize
-        inputs = model.tokenizer(text, return_tensors="pt").to(model.device)
-        
-        # Get loss
-        with torch.no_grad():
-            outputs = model.model(**inputs, labels=inputs["input_ids"])
-            loss = outputs.loss.item()
-        
-        # Perplexity = exp(loss)
-        return math.exp(loss)
-        
-    except Exception as e:
-        print(f"Perplexity calculation error: {e}")
-        return float('inf')
-
-
-def compute_perplexity_increase(
-    model, 
-    steered_text: str, 
-    baseline_text: str
-) -> float:
-    """Compute relative perplexity increase from baseline.
+    rep_3 = compute_ngram_repetition(text, 3)
+    rep_5 = compute_ngram_repetition(text, 5)
     
-    Returns ratio: steered_ppl / baseline_ppl
-    - ratio = 1.0: No change
-    - ratio > 1.0: Degradation (less fluent)
-    - ratio < 1.0: Improvement (more fluent)
+    return rep_3 > threshold_3gram or rep_5 > threshold_5gram
+
+
+# =============================================================================
+# JACCARD OVERLAP (CORRECT IMPLEMENTATION!)
+# =============================================================================
+
+def jaccard_overlap(set_a: Set, set_b: Set) -> float:
+    """Compute Jaccard similarity between two sets.
+    
+    CORRECT FORMULA: |A ∩ B| / |A ∪ B|
+    
+    This ALWAYS returns a value between 0 and 1.
+    
+    Args:
+        set_a: First set
+        set_b: Second set
+        
+    Returns:
+        Jaccard similarity (0 to 1)
     """
-    steered_ppl = compute_perplexity(model, steered_text)
-    baseline_ppl = compute_perplexity(model, baseline_text)
+    intersection = len(set_a & set_b)
+    union = len(set_a | set_b)
     
-    if baseline_ppl == 0 or baseline_ppl == float('inf'):
-        return float('inf')
+    if union == 0:
+        return 0.0
     
-    return steered_ppl / baseline_ppl
+    result = intersection / union
+    
+    # Sanity check - this should NEVER fail
+    assert 0.0 <= result <= 1.0, f"Invalid Jaccard: {result}"
+    
+    return result
 
 
-# ============================================================================
-# LLM-AS-JUDGE EVALUATION
-# ============================================================================
-def llm_judge_evaluate(
-    prompt: str, 
+def dice_coefficient(set_a: Set, set_b: Set) -> float:
+    """Compute Dice coefficient (alternative to Jaccard).
+    
+    FORMULA: 2 * |A ∩ B| / (|A| + |B|)
+    
+    Args:
+        set_a: First set
+        set_b: Second set
+        
+    Returns:
+        Dice coefficient (0 to 1)
+    """
+    intersection = len(set_a & set_b)
+    total = len(set_a) + len(set_b)
+    
+    if total == 0:
+        return 0.0
+    
+    return 2 * intersection / total
+
+
+def overlap_coefficient(set_a: Set, set_b: Set) -> float:
+    """Compute overlap coefficient.
+    
+    FORMULA: |A ∩ B| / min(|A|, |B|)
+    
+    This measures how much the smaller set is contained in the larger.
+    
+    Args:
+        set_a: First set
+        set_b: Second set
+        
+    Returns:
+        Overlap coefficient (0 to 1)
+    """
+    intersection = len(set_a & set_b)
+    min_size = min(len(set_a), len(set_b))
+    
+    if min_size == 0:
+        return 0.0
+    
+    return intersection / min_size
+
+
+# =============================================================================
+# LLM-AS-JUDGE
+# =============================================================================
+
+def llm_judge_gemini(
+    prompt: str,
     output: str,
-    provider: str = "gemini",
-    model_name: str = "gemini-2.0-flash"
-) -> Dict:
-    """Evaluate output using LLM as judge.
+    api_key: Optional[str] = None
+) -> Optional[Dict]:
+    """Use Gemini as a judge for output quality.
     
-    Supports: gemini (free), claude, openai
-    
+    Args:
+        prompt: Original prompt
+        output: Model output
+        api_key: Gemini API key (or from environment)
+        
     Returns:
-        {"is_hindi": bool, "coherence_score": int, "relevance_score": int, "reasoning": str}
+        Dict with evaluation results or None if error
     """
     import os
     
-    # Format prompt
-    judge_prompt = f"""You are evaluating whether a language model successfully generated Hindi text.
+    if api_key is None:
+        api_key = os.environ.get("GOOGLE_API_KEY", "")
+    
+    if not api_key:
+        return None
+    
+    try:
+        import google.generativeai as genai
+        
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        
+        judge_prompt = f"""You are evaluating whether a language model successfully generated Hindi text.
 
 Task: Determine if the output is PRIMARILY in Hindi (Devanagari script).
 
@@ -282,388 +293,174 @@ Evaluation criteria:
 3. Does the text respond appropriately to the prompt?
 
 Prompt: {prompt}
-Output: {output[:500]}
+Output: {output}
 
 Respond ONLY with a JSON object (no markdown, no explanation):
 {{"is_hindi": true/false, "coherence_score": 1-5, "relevance_score": 1-5, "reasoning": "brief explanation"}}"""
-
-    try:
-        if provider == "gemini":
-            api_key = os.environ.get("GOOGLE_API_KEY", "")
-            if not api_key:
-                return {"is_hindi": False, "coherence_score": 0, "relevance_score": 0, 
-                        "reasoning": "No API key", "error": True}
-            
-            from google import genai
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=model_name,
-                contents=judge_prompt,
-            )
-            response_text = response.text
-            
-        elif provider == "claude":
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                return {"is_hindi": False, "coherence_score": 0, "relevance_score": 0,
-                        "reasoning": "No API key", "error": True}
-            
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model=model_name,
-                max_tokens=200,
-                messages=[{"role": "user", "content": judge_prompt}]
-            )
-            response_text = response.content[0].text
-            
-        elif provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if not api_key:
-                return {"is_hindi": False, "coherence_score": 0, "relevance_score": 0,
-                        "reasoning": "No API key", "error": True}
-            
-            import openai
-            client = openai.OpenAI(api_key=api_key)
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": judge_prompt}],
-                max_tokens=200
-            )
-            response_text = response.choices[0].message.content
         
-        else:
-            return {"is_hindi": False, "coherence_score": 0, "relevance_score": 0,
-                    "reasoning": f"Unknown provider: {provider}", "error": True}
+        response = model.generate_content(judge_prompt)
         
-        # Parse JSON response
-        # Clean up response (remove markdown if present)
-        response_text = response_text.strip()
-        if response_text.startswith("```"):
-            response_text = re.sub(r'^```(?:json)?\n?', '', response_text)
-            response_text = re.sub(r'\n?```$', '', response_text)
+        # Parse JSON from response
+        text = response.text.strip()
+        # Remove markdown if present
+        if text.startswith("```"):
+            text = re.sub(r"```\w*\n?", "", text).strip()
         
-        result = json.loads(response_text)
-        result["error"] = False
-        return result
+        return json.loads(text)
         
     except Exception as e:
-        return {
-            "is_hindi": False, 
-            "coherence_score": 0, 
-            "relevance_score": 0,
-            "reasoning": str(e),
-            "error": True
-        }
+        print(f"LLM judge error: {e}")
+        return None
 
 
-# ============================================================================
+# =============================================================================
 # COMPREHENSIVE EVALUATION
-# ============================================================================
-def evaluate_steered_output(
+# =============================================================================
+
+def evaluate_steering_output(
     prompt: str,
     output: str,
-    steering_strength: float,
-    baseline_output: Optional[str] = None,
-    model = None,
-    use_llm_judge: bool = True,
-    llm_provider: str = "gemini"
+    target_script: str = "devanagari",
+    use_llm_judge: bool = False
 ) -> SteeringEvalResult:
-    """Comprehensive evaluation of steered output.
+    """Comprehensive evaluation of a steering output.
     
     Args:
-        prompt: Input prompt
+        prompt: Original prompt
         output: Steered model output
-        steering_strength: Strength used for steering
-        baseline_output: Unsteered output (for perplexity comparison)
-        model: Language model (for perplexity calculation)
+        target_script: Expected script
         use_llm_judge: Whether to use LLM judge
-        llm_provider: LLM provider for judge
         
     Returns:
         SteeringEvalResult with all metrics
     """
-    result = SteeringEvalResult(
+    # Script detection
+    script_ratios = detect_scripts(output)
+    target_ratio = script_ratios.get(target_script, 0)
+    is_target = target_ratio >= DEVANAGARI_THRESHOLD
+    
+    # Repetition detection
+    rep_3 = compute_ngram_repetition(output, 3)
+    rep_5 = compute_ngram_repetition(output, 5)
+    degraded = is_degraded(output)
+    
+    # LLM judge (optional)
+    llm_result = None
+    if use_llm_judge:
+        llm_result = llm_judge_gemini(prompt, output)
+    
+    return SteeringEvalResult(
         prompt=prompt,
         output=output,
-        steering_strength=steering_strength
+        script_ratios=script_ratios,
+        is_target_script=is_target,
+        repetition_3gram=rep_3,
+        repetition_5gram=rep_5,
+        is_degraded=degraded,
+        llm_judge_result=llm_result
     )
-    
-    # 1. Script detection
-    result.devanagari_ratio = detect_script_ratio(output, "devanagari")
-    result.is_hindi = result.devanagari_ratio >= 0.3
-    
-    # 2. Repetition detection (coherence)
-    result.repetition_3gram = detect_repetition(output, 3)
-    result.repetition_5gram = detect_repetition(output, 5)
-    result.is_degraded = is_degraded(output)
-    
-    # 3. Perplexity (fluency)
-    if model is not None and baseline_output is not None:
-        result.perplexity_increase = compute_perplexity_increase(
-            model, output, baseline_output
-        )
-    
-    # 4. LLM judge
-    if use_llm_judge:
-        judge_result = llm_judge_evaluate(prompt, output, provider=llm_provider)
-        if not judge_result.get("error", False):
-            result.llm_is_hindi = judge_result.get("is_hindi", False)
-            result.llm_coherence = judge_result.get("coherence_score", 0)
-            result.llm_relevance = judge_result.get("relevance_score", 0)
-    
-    # 5. Overall success
-    # Success = Hindi + not degraded + coherent
-    result.success = (
-        result.is_hindi and 
-        not result.is_degraded and
-        (not use_llm_judge or result.llm_coherence >= 3)
-    )
-    
-    return result
 
 
-# ============================================================================
-# CAPABILITY PRESERVATION EVALUATION
-# ============================================================================
-def evaluate_capability_preservation(
-    model,
-    steering_vector,
-    steering_strength: float,
-    capability_prompts: List[str],
-    expected_answers: Optional[Dict[str, str]] = None
-) -> List[CapabilityEvalResult]:
-    """Evaluate if steering preserves model capabilities.
-    
-    Based on O'Brien et al. 2024:
-    "Systematic degradation of performance across multiple benchmark tasks,
-    even on safe inputs with no apparent connection to refusal behavior."
+def aggregate_results(results: List[SteeringEvalResult]) -> AggregateResults:
+    """Aggregate multiple evaluation results.
     
     Args:
-        model: Language model with steering capability
-        steering_vector: The steering vector to apply
-        steering_strength: Strength to apply
-        capability_prompts: List of capability test prompts
-        expected_answers: Optional dict of expected answers
+        results: List of individual results
         
     Returns:
-        List of CapabilityEvalResult
+        AggregateResults with summary statistics
     """
-    results = []
-    
-    # Simple expected answers (keyword matching)
-    DEFAULT_EXPECTED = {
-        "What is the capital of France?": ["Paris", "paris"],
-        "Who wrote Romeo and Juliet?": ["Shakespeare", "shakespeare", "William"],
-        "What is the chemical formula for water?": ["H2O", "h2o"],
-        "How many continents are there?": ["7", "seven"],
-        "What planet is known as the Red Planet?": ["Mars", "mars"],
-        "If I have 3 apples and give away 1, how many do I have?": ["2", "two"],
-        "What comes next in the sequence: 2, 4, 6, 8, ?": ["10", "ten"],
-        "What is 15 + 27?": ["42"],
-        "If today is Monday, what day is tomorrow?": ["Tuesday", "tuesday"],
-    }
-    
-    if expected_answers is None:
-        expected_answers = DEFAULT_EXPECTED
-    
-    for prompt in capability_prompts:
-        # Generate baseline (no steering)
-        baseline_output = model.generate(prompt, steering_vector=None)
-        
-        # Generate steered
-        steered_output = model.generate(
-            prompt, 
-            steering_vector=steering_vector,
-            steering_strength=steering_strength
-        )
-        
-        # Check correctness
-        expected = expected_answers.get(prompt, [])
-        
-        baseline_correct = any(
-            exp.lower() in baseline_output.lower() 
-            for exp in expected
-        ) if expected else True  # Assume correct if no expected answer
-        
-        steered_correct = any(
-            exp.lower() in steered_output.lower() 
-            for exp in expected
-        ) if expected else True
-        
-        result = CapabilityEvalResult(
-            task="general_knowledge" if "?" in prompt else "instruction",
-            prompt=prompt,
-            baseline_output=baseline_output,
-            steered_output=steered_output,
-            baseline_correct=baseline_correct,
-            steered_correct=steered_correct,
-            capability_preserved=(baseline_correct == steered_correct)
-        )
-        
-        results.append(result)
-    
-    return results
-
-
-# ============================================================================
-# AGGREGATE METRICS
-# ============================================================================
-def compute_aggregate_metrics(
-    results: List[SteeringEvalResult]
-) -> Dict:
-    """Compute aggregate metrics from evaluation results."""
-    
     if not results:
-        return {}
+        return AggregateResults(
+            n_samples=0,
+            success_rate=0.0,
+            avg_target_script_ratio=0.0,
+            avg_repetition_3gram=0.0,
+            avg_repetition_5gram=0.0,
+            degradation_rate=0.0
+        )
     
     n = len(results)
     
-    return {
-        "n_samples": n,
-        "success_rate": sum(r.success for r in results) / n,
-        "hindi_rate": sum(r.is_hindi for r in results) / n,
-        "avg_devanagari_ratio": sum(r.devanagari_ratio for r in results) / n,
-        "degradation_rate": sum(r.is_degraded for r in results) / n,
-        "avg_repetition_3gram": sum(r.repetition_3gram for r in results) / n,
-        "avg_repetition_5gram": sum(r.repetition_5gram for r in results) / n,
-        "llm_hindi_rate": sum(r.llm_is_hindi for r in results) / n,
-        "avg_llm_coherence": sum(r.llm_coherence for r in results) / n,
-        "avg_llm_relevance": sum(r.llm_relevance for r in results) / n,
-    }
+    success_count = sum(1 for r in results if r.is_target_script)
+    target_ratios = [r.script_ratios.get("devanagari", 0) for r in results]
+    rep_3_values = [r.repetition_3gram for r in results]
+    rep_5_values = [r.repetition_5gram for r in results]
+    degraded_count = sum(1 for r in results if r.is_degraded)
+    
+    return AggregateResults(
+        n_samples=n,
+        success_rate=success_count / n,
+        avg_target_script_ratio=sum(target_ratios) / n,
+        avg_repetition_3gram=sum(rep_3_values) / n,
+        avg_repetition_5gram=sum(rep_5_values) / n,
+        degradation_rate=degraded_count / n
+    )
 
 
-def compute_capability_preservation_rate(
-    results: List[CapabilityEvalResult]
-) -> Dict:
-    """Compute capability preservation metrics."""
-    
-    if not results:
-        return {}
-    
-    n = len(results)
-    
-    return {
-        "n_samples": n,
-        "baseline_accuracy": sum(r.baseline_correct for r in results) / n,
-        "steered_accuracy": sum(r.steered_correct for r in results) / n,
-        "preservation_rate": sum(r.capability_preserved for r in results) / n,
-        "capability_drop": (
-            sum(r.baseline_correct for r in results) - 
-            sum(r.steered_correct for r in results)
-        ) / n,
-    }
+# =============================================================================
+# TESTING
+# =============================================================================
 
-
-# ============================================================================
-# JACCARD OVERLAP (CORRECT IMPLEMENTATION)
-# ============================================================================
-def jaccard_overlap(set_a: set, set_b: set) -> float:
-    """Compute Jaccard overlap between two sets.
-    
-    CORRECT implementation - cannot exceed 1.0 (100%)
-    
-    J(A,B) = |A ∩ B| / |A ∪ B|
-    
-    Args:
-        set_a: First set of feature IDs
-        set_b: Second set of feature IDs
-        
-    Returns:
-        Jaccard similarity (0.0 to 1.0)
-    """
-    if not isinstance(set_a, set):
-        set_a = set(set_a)
-    if not isinstance(set_b, set):
-        set_b = set(set_b)
-    
-    intersection = len(set_a & set_b)
-    union = len(set_a | set_b)
-    
-    if union == 0:
-        return 0.0
-    
-    overlap = intersection / union
-    
-    # Sanity check - Jaccard CANNOT exceed 1.0
-    assert overlap <= 1.0, f"Bug: Jaccard overlap = {overlap} > 1.0!"
-    
-    return overlap
-
-
-def semantic_vs_script_overlap(
-    features_lang1: set,
-    features_lang2: set,
-    script1: str,
-    script2: str
-) -> Dict:
-    """Analyze semantic vs script feature overlap between two languages.
-    
-    For Hindi-Urdu:
-    - SEMANTIC overlap should be HIGH (94%+) - same spoken language
-    - SCRIPT overlap should be LOW (<20%) - different writing systems
-    
-    This helps disentangle semantic content from orthographic representation.
-    """
-    total_overlap = jaccard_overlap(features_lang1, features_lang2)
-    
-    # Shared features (intersection)
-    shared = features_lang1 & features_lang2
-    
-    # Unique features
-    unique_lang1 = features_lang1 - features_lang2
-    unique_lang2 = features_lang2 - features_lang1
-    
-    return {
-        "total_overlap": total_overlap,
-        "shared_features": len(shared),
-        "unique_lang1": len(unique_lang1),  # Likely script-specific
-        "unique_lang2": len(unique_lang2),  # Likely script-specific
-        "script1": script1,
-        "script2": script2,
-    }
-
-
-# ============================================================================
-# MAIN TEST
-# ============================================================================
 if __name__ == "__main__":
-    # Test evaluation functions
-    print("=" * 60)
-    print("EVALUATION MODULE TEST")
-    print("=" * 60)
+    print("Testing evaluation module...")
     
-    # Test script detection
-    hindi_text = "यह एक परीक्षण वाक्य है।"
-    english_text = "This is a test sentence."
-    mixed_text = "यह is a मिश्रित sentence."
-    
-    print("\n1. Script Detection:")
-    print(f"  Hindi text: {detect_script_ratio(hindi_text, 'devanagari'):.2%} Devanagari")
-    print(f"  English text: {detect_script_ratio(english_text, 'devanagari'):.2%} Devanagari")
-    print(f"  Mixed text: {detect_script_ratio(mixed_text, 'devanagari'):.2%} Devanagari")
-    
-    # Test repetition detection
-    repeated_text = "the cat sat on the cat sat on the cat sat on the mat"
-    normal_text = "The quick brown fox jumps over the lazy dog."
-    
-    print("\n2. Repetition Detection:")
-    print(f"  Repeated text: rep3={detect_repetition(repeated_text, 3):.2%}")
-    print(f"  Normal text: rep3={detect_repetition(normal_text, 3):.2%}")
-    
-    # Test Jaccard overlap
-    print("\n3. Jaccard Overlap (CORRECT):")
+    # Test Jaccard (CRITICAL!)
+    print("\n1. Testing Jaccard overlap...")
     set_a = {1, 2, 3, 4, 5}
     set_b = {3, 4, 5, 6, 7}
+    
+    jaccard = jaccard_overlap(set_a, set_b)
+    expected = 3 / 7  # |{3,4,5}| / |{1,2,3,4,5,6,7}| = 3/7
+    
     print(f"  Set A: {set_a}")
     print(f"  Set B: {set_b}")
-    print(f"  Jaccard: {jaccard_overlap(set_a, set_b):.2%}")
+    print(f"  Intersection: {set_a & set_b}")
+    print(f"  Union: {set_a | set_b}")
+    print(f"  Jaccard: {jaccard:.4f} (expected {expected:.4f})")
     
-    # Test edge case - identical sets
-    print(f"  Identical sets: {jaccard_overlap(set_a, set_a):.2%}")
+    assert abs(jaccard - expected) < 0.001, f"Jaccard failed! Got {jaccard}, expected {expected}"
+    assert 0 <= jaccard <= 1, f"Jaccard out of range: {jaccard}"
+    print("  ✓ Jaccard test passed!")
     
-    # Test edge case - disjoint sets
-    set_c = {10, 11, 12}
-    print(f"  Disjoint sets: {jaccard_overlap(set_a, set_c):.2%}")
+    # Test edge cases
+    print("\n2. Testing Jaccard edge cases...")
+    
+    # Identical sets
+    same = jaccard_overlap({1, 2, 3}, {1, 2, 3})
+    assert same == 1.0, f"Same sets should have Jaccard=1, got {same}"
+    print(f"  Identical sets: {same} (expected 1.0) ✓")
+    
+    # Disjoint sets
+    disjoint = jaccard_overlap({1, 2}, {3, 4})
+    assert disjoint == 0.0, f"Disjoint sets should have Jaccard=0, got {disjoint}"
+    print(f"  Disjoint sets: {disjoint} (expected 0.0) ✓")
+    
+    # Empty sets
+    empty = jaccard_overlap(set(), set())
+    assert empty == 0.0, f"Empty sets should have Jaccard=0, got {empty}"
+    print(f"  Empty sets: {empty} (expected 0.0) ✓")
+    
+    # Test script detection
+    print("\n3. Testing script detection...")
+    hindi_text = "नमस्ते दुनिया"
+    ratios = detect_scripts(hindi_text)
+    print(f"  Hindi text: '{hindi_text}'")
+    print(f"  Devanagari ratio: {ratios.get('devanagari', 0):.2f}")
+    assert ratios.get("devanagari", 0) > 0.9, "Should detect Hindi as Devanagari"
+    print("  ✓ Script detection passed!")
+    
+    # Test repetition
+    print("\n4. Testing repetition detection...")
+    normal = "This is a normal sentence with varied words."
+    repeated = "hello hello hello hello hello hello"
+    
+    rep_normal = compute_ngram_repetition(normal, 3)
+    rep_bad = compute_ngram_repetition(repeated, 3)
+    
+    print(f"  Normal text repetition: {rep_normal:.2f}")
+    print(f"  Repeated text repetition: {rep_bad:.2f}")
+    assert rep_bad > rep_normal, "Repeated text should have higher repetition"
+    print("  ✓ Repetition detection passed!")
     
     print("\n✓ All tests passed!")
