@@ -255,18 +255,53 @@ This is a NOVEL finding worth publishing!
     """)
 
 
+def setup_config():
+    """Copy all updated files to current directory."""
+    import shutil
+    
+    print("=" * 60)
+    print("SETTING UP UPDATED FILES")
+    print("=" * 60)
+    
+    source_dir = Path("/mnt/user-data/outputs/sae_multilingual")
+    
+    files_to_copy = [
+        "config.py",
+        "data.py",
+        "evaluation.py",
+        "plots.py",
+        "verify.py",
+    ]
+    
+    for f in files_to_copy:
+        src = source_dir / f
+        dst = Path(f)
+        if src.exists():
+            shutil.copy(src, dst)
+            print(f"  ✓ Copied {f}")
+        else:
+            print(f"  ⚠ {f} not found in source")
+    
+    print("\n✓ Setup complete! Run: python test_and_run.py --run all")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test and run SAE experiments")
     parser.add_argument("--test-api", action="store_true", help="Test Gemini API")
     parser.add_argument("--validate", action="store_true", help="Validate setup")
     parser.add_argument("--run", type=str, help="Run experiment (exp1/exp2/exp3/all)")
-    parser.add_argument("--config", type=str, default="config_v2.py", help="Config file")
+    parser.add_argument("--config", type=str, default="config.py", help="Config file")
     parser.add_argument("--quick-start", action="store_true", help="Show quick start guide")
+    parser.add_argument("--setup", action="store_true", help="Copy updated files to current directory")
     
     args = parser.parse_args()
     
     if args.quick_start or len(sys.argv) == 1:
         print_quick_start()
+        return
+    
+    if args.setup:
+        setup_config()
         return
     
     if args.test_api:
