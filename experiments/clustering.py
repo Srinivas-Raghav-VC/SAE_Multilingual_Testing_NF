@@ -27,11 +27,8 @@ from tqdm import tqdm
 from pathlib import Path
 
 from config import (
-    TARGET_LAYERS,
-    STEERING_STRENGTHS,
-    NUM_FEATURES_OPTIONS,
-    N_SAMPLES_DISCOVERY,
-    N_SAMPLES_EVAL,
+    TARGET_LAYERS, STEERING_STRENGTHS, NUM_FEATURES_OPTIONS,
+    N_SAMPLES_DISCOVERY, N_SAMPLES_EVAL,
 )
 from data import load_flores, load_parallel_pairs
 from model import GemmaWithSAE
@@ -185,23 +182,24 @@ def main():
         "The future of technology is",
     ]
     
-    # Evaluate a subset of layers for steering (early, mid, late)
-    layers_to_test = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]
-    if not layers_to_test:
-        layers_to_test = [13]
-    
+    # Test multiple layers to find the best one
+    test_layers = [5, 13, 20, 24]  # Early, mid, late layers
     num_features = 25
-    all_results = {"num_features": num_features, "layers": {}}
     
-    for layer in layers_to_test:
-        print(f"\nRunning steering experiments at layer {layer}...")
-        layer_results = {"methods": {}}
+    all_results = {"layers": {}, "summary": {}}
+    
+    for layer in test_layers:
+        print(f"\n{'='*60}")
+        print(f"Testing layer {layer}")
+        print("="*60)
+        
+        results = {"layer": layer, "num_features": num_features, "methods": {}}
         
         # Method 1: Activation difference
         print("\n1. Activation-diff features...")
         act_diff_feats = get_activation_diff_features(model, texts_en, texts_hi, layer, num_features)
         act_diff_vec = construct_sae_steering_vector(model, layer, act_diff_feats)
-        layer_results["methods"]["activation_diff"] = run_steering_experiment(
+        results["methods"]["activation_diff"] = run_steering_experiment(
             model, layer, test_prompts, act_diff_vec, STEERING_STRENGTHS
         )
         
@@ -209,7 +207,7 @@ def main():
         print("\n2. Monolinguality features...")
         mono_feats = get_monolinguality_features(model, flores, layer, "hi", num_features)
         mono_vec = construct_sae_steering_vector(model, layer, mono_feats)
-        layer_results["methods"]["monolinguality"] = run_steering_experiment(
+        results["methods"]["monolinguality"] = run_steering_experiment(
             model, layer, test_prompts, mono_vec, STEERING_STRENGTHS
         )
         
@@ -218,18 +216,41 @@ def main():
         sae = model.load_sae(layer)
         random_feats = get_random_features(sae, num_features)
         random_vec = construct_sae_steering_vector(model, layer, random_feats)
-        layer_results["methods"]["random"] = run_steering_experiment(
+        results["methods"]["random"] = run_steering_experiment(
             model, layer, test_prompts, random_vec, STEERING_STRENGTHS
         )
         
         # Method 4: Dense (no SAE)
         print("\n4. Dense steering...")
         dense_vec = construct_dense_steering_vector(model, texts_en, texts_hi, layer)
-        layer_results["methods"]["dense"] = run_steering_experiment(
+        results["methods"]["dense"] = run_steering_experiment(
             model, layer, test_prompts, dense_vec, STEERING_STRENGTHS
         )
         
-        all_results["layers"][str(layer)] = layer_results
+        all_results["layers"][str(layer)] = results
+        
+        # Print layer summary
+        print(f"\n--- Layer {layer} Results ---")
+        for method, data in results["methods"].items():
+            best_strength = max(data.keys(), key=lambda s: data[s]["success_rate"])
+            best_rate = data[best_strength]["success_rate"]
+            print(f"  {method}: {best_rate:.1%} at strength {best_strength}")
+    
+    # Find best layer for each method
+    print("\n" + "="*60)
+    print("SUMMARY: Best layer for each method")
+    print("="*60)
+    
+    for method in ["activation_diff", "monolinguality", "random", "dense"]:
+        best_layer = None
+        best_rate = 0
+        for layer_str, layer_data in all_results["layers"].items():
+            layer_best = max(layer_data["methods"][method].values(), key=lambda x: x["success_rate"])["success_rate"]
+            if layer_best > best_rate:
+                best_rate = layer_best
+                best_layer = layer_str
+        all_results["summary"][method] = {"best_layer": best_layer, "best_rate": best_rate}
+        print(f"{method}: Layer {best_layer} with {best_rate:.1%} success")
     
     # Save results
     output_dir = Path("results")
@@ -238,26 +259,25 @@ def main():
     with open(output_dir / "exp2_steering_comparison.json", "w") as f:
         json.dump(all_results, f, indent=2)
     
-    # Print summary across layers
-    print("\n=== H2 Analysis (multi-layer) ===")
-    print(f"{'Layer':<8} {'Method':<20} {'Best Rate':<12} {'Best Strength':<15}")
-    print("-" * 60)
+    # H2 Analysis across all layers
+    print("\n=== H2 Analysis (per layer) ===")
+    print(f"{'Layer':<8} {'Act-Diff':<12} {'Mono':<12} {'Random':<12} {'Dense':<12} {'Diff':<12}")
+    print("-" * 70)
     
     for layer_str, layer_data in all_results["layers"].items():
-        for method, data in layer_data["methods"].items():
-            best_strength = max(data.keys(), key=lambda s: data[s]["success_rate"])
-            best_rate = data[best_strength]["success_rate"]
-            print(f"{layer_str:<8} {method:<20} {best_rate:<12.1%} {best_strength:<15}")
+        act_best = max(layer_data["methods"]["activation_diff"].values(), key=lambda x: x["success_rate"])["success_rate"]
+        mono_best = max(layer_data["methods"]["monolinguality"].values(), key=lambda x: x["success_rate"])["success_rate"]
+        rand_best = max(layer_data["methods"]["random"].values(), key=lambda x: x["success_rate"])["success_rate"]
+        dense_best = max(layer_data["methods"]["dense"].values(), key=lambda x: x["success_rate"])["success_rate"]
+        diff = act_best - mono_best
+        print(f"{layer_str:<8} {act_best:<12.1%} {mono_best:<12.1%} {rand_best:<12.1%} {dense_best:<12.1%} {diff:+.1%}")
     
-    # H2 comparison at mid-layer (13) if available, else first tested layer
-    compare_layer = "13" if "13" in all_results["layers"] else next(iter(all_results["layers"].keys()))
-    layer_data = all_results["layers"][compare_layer]["methods"]
-    act_best = max(layer_data["activation_diff"].values(), key=lambda x: x["success_rate"])["success_rate"]
-    mono_best = max(layer_data["monolinguality"].values(), key=lambda x: x["success_rate"])["success_rate"]
-    
-    diff = (act_best - mono_best) * 100
-    print(f"\n[Layer {compare_layer}] Activation-diff vs Monolinguality: {diff:+.1f}% difference")
-    print(f"H2 Status: {'PASS' if abs(diff) >= 5 else 'FAIL (difference < 5%)'}")
+    # Overall H2 status
+    act_overall = all_results["summary"]["activation_diff"]["best_rate"]
+    mono_overall = all_results["summary"]["monolinguality"]["best_rate"]
+    overall_diff = (act_overall - mono_overall) * 100
+    print(f"\nOverall: Activation-diff ({act_overall:.1%}) vs Monolinguality ({mono_overall:.1%}): {overall_diff:+.1f}%")
+    print(f"H2 Status: {'PASS' if overall_diff >= 5 else 'FAIL (difference < 5%)'}")
 
 
 if __name__ == "__main__":

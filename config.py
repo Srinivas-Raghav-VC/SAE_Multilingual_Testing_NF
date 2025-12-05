@@ -11,13 +11,23 @@ import os
 # =============================================================================
 # MODEL CONFIGURATION
 # =============================================================================
+
+# Default base model for most experiments (Gemma 2 2B)
 MODEL_ID = "google/gemma-2-2b"
 MODEL_NAME = MODEL_ID  # Alias
 N_LAYERS = 26
 HIDDEN_DIM = 2304
 
-# SAE Configuration
-SAE_RELEASE = "gemma-scope-2b-pt-res"
+# Optional: larger model for scaling experiments
+MODEL_ID_9B = "google/gemma-2-9b"
+
+# SAE Configuration (Gemma Scope releases)
+# These match the official Hugging Face repos:
+#   - google/gemma-scope-2b-pt-res
+#   - google/gemma-scope-9b-pt-res
+SAE_RELEASE = "gemma-scope-2b-pt-res-canonical"
+SAE_RELEASE_2B = "gemma-scope-2b-pt-res-canonical"
+SAE_RELEASE_9B = "gemma-scope-9b-pt-res-canonical"
 SAE_WIDTH = "16k"
 
 # Attention implementation (use "eager" for compatibility)
@@ -112,6 +122,14 @@ DEVANAGARI_THRESHOLD = 0.3
 # Repetition thresholds (degradation indicators)
 REPETITION_3GRAM_THRESHOLD = 0.3
 REPETITION_5GRAM_THRESHOLD = 0.2
+
+# Semantic evaluation (LaBSE + threshold)
+# LaBSE is multilingual and strong on Indic languages, making it suitable
+# for semantic-preservation checks in steering experiments.
+SEMANTIC_MODEL_NAME = "sentence-transformers/LaBSE"
+# Cosine similarity threshold for “semantics preserved”.
+# 0.7 is a standard strong-similarity cutoff in multilingual ST literature.
+SEMANTIC_SIM_THRESHOLD = 0.7
 
 # =============================================================================
 # STEERING CONFIGURATION

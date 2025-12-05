@@ -12,25 +12,33 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sae_lens import SAE
 
-from config import MODEL_ID, HIDDEN_DIM, ATTN_IMPLEMENTATION, HF_TOKEN
+from config import MODEL_ID, HIDDEN_DIM, ATTN_IMPLEMENTATION, HF_TOKEN, SAE_RELEASE
 
 
 class GemmaWithSAE:
     """Gemma 2 model with Gemma Scope SAE access."""
     
-    def __init__(self, device="cuda", dtype=torch.bfloat16):
+    def __init__(
+        self,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        model_id: str = MODEL_ID,
+        sae_release: str = SAE_RELEASE,
+    ):
         self.device = device if torch.cuda.is_available() else "cpu"
         self.dtype = dtype if self.device == "cuda" else torch.float32
         self.model = None
         self.tokenizer = None
         self.saes = {}  # layer -> SAE
+        self.model_id = model_id
+        self.sae_release = sae_release
     
     def load_model(self):
         """Load the base Gemma model."""
-        print(f"Loading {MODEL_ID}...")
+        print(f"Loading {self.model_id}...")
         
         self.tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_ID,
+            self.model_id,
             token=HF_TOKEN if HF_TOKEN else None
         )
         
@@ -48,7 +56,7 @@ class GemmaWithSAE:
             print("Flash attention not available, using default")
         
         self.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID,
+            self.model_id,
             token=HF_TOKEN if HF_TOKEN else None,
             **model_kwargs
         )
@@ -69,11 +77,11 @@ class GemmaWithSAE:
         if layer in self.saes:
             return self.saes[layer]
         
-        print(f"Loading SAE for layer {layer}...")
+        print(f"Loading SAE for layer {layer} from {self.sae_release}...")
         
-        # Gemma Scope SAE naming convention
+        # Gemma Scope SAE naming convention (residual SAEs, width 16k by default)
         sae, _, _ = SAE.from_pretrained(
-            release="gemma-scope-2b-pt-res-canonical",
+            release=self.sae_release,
             sae_id=f"layer_{layer}/width_16k/canonical",
             device=self.device,
         )

@@ -185,20 +185,75 @@ def run_exp3():
     print("Testing semantic vs script feature separation")
     print("=" * 60 + "\n")
     
-    from experiments.exp3_hindi_urdu import main
+    from experiments.exp3_hindi_urdu_fixed import main
     main()
 
 
+def run_exp6():
+    """Run Experiment 6: Script vs Semantics Controls."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 6: Script vs Semantics Controls")
+    print("=" * 60)
+    print("Goal: Separate script-only vs semantic/generative Indic features")
+    print("=" * 60 + "\n")
+
+    from experiments.exp6_script_semantics_controls import main
+    main()
+
+
+def run_exp7():
+    """Run Experiment 7: Causal Probing of SAE Features."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 7: Causal Probing of SAE Features")
+    print("=" * 60)
+    print("Goal: Estimate causal effect of individual features on Hindi steering")
+    print("=" * 60 + "\n")
+
+    from experiments.exp7_causal_feature_probing import main
+    main()
+
+
+def run_exp8():
+    """Run Experiment 8: Scaling to 9B and Low-Resource Languages."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 8: Scaling to 9B and Low-Resource Languages")
+    print("=" * 60)
+    print("Goal: Compare 2B vs 9B and low-resource behavior")
+    print("=" * 60 + "\n")
+
+    from experiments.exp8_scaling_9b_low_resource import main
+    main()
+
+
+def run_exp9():
+    """Run Experiment 9: Layer-wise Steering Sweep with LLM Judge."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 9: Layer-wise Steering Sweep")
+    print("=" * 60)
+    print("Goal: Find most effective steering layers and methods per language")
+    print("=" * 60 + "\n")
+
+    from experiments.exp9_layer_sweep_steering import run_layer_sweep
+    run_layer_sweep()
+
+
 def run_all():
-    """Run all experiments sequentially."""
+    """Run all core experiments sequentially, then generate plots."""
     print("\n" + "=" * 60)
     print("RUNNING ALL EXPERIMENTS")
     print("=" * 60)
     
     experiments = [
-        ("exp1", run_exp1),
-        ("exp2", run_exp2),
-        ("exp3", run_exp3),
+        ("exp1_feature_discovery", run_exp1),
+        ("exp2_steering_comparison", run_exp2),
+        ("exp3_hindi_urdu_overlap", run_exp3),
+        ("exp4_spillover", lambda: __import__("experiments.exp4_spillover", fromlist=["main"]).main()),
+        ("exp5_hierarchical", lambda: __import__("experiments.exp5_hierarchical", fromlist=["main"]).main()),
+        ("exp6_script_semantics_controls", run_exp6),
+        ("exp7_causal_feature_probing", run_exp7),
+        ("exp8_scaling_9b_low_resource", run_exp8),
+        ("exp9_layer_sweep_steering", run_exp9),
+        ("exp10_attribution_occlusion", lambda: __import__("experiments.exp10_attribution_occlusion", fromlist=["main"]).main()),
     ]
     
     results = {}
@@ -215,6 +270,17 @@ def run_all():
             print(f"\n✗ {name} failed: {e}")
             import traceback
             traceback.print_exc()
+    
+    # Generate plots at the end
+    print("\n" + "=" * 60)
+    print("GENERATING PLOTS")
+    print("=" * 60)
+    try:
+        import subprocess
+        subprocess.run(["python", "plots.py", "--results_dir", "results"], check=False)
+        print("✓ Plot generation invoked (see results/figures)")
+    except Exception as e:
+        print(f"✗ Plot generation failed: {e}")
     
     # Summary
     print("\n" + "=" * 60)
@@ -244,6 +310,11 @@ Examples:
     parser.add_argument("--exp1", action="store_true", help="Run exp1: Feature Discovery")
     parser.add_argument("--exp2", action="store_true", help="Run exp2: Steering Comparison")
     parser.add_argument("--exp3", action="store_true", help="Run exp3: Hindi-Urdu Overlap")
+    parser.add_argument("--exp6", action="store_true", help="Run exp6: Script vs Semantics Controls")
+    parser.add_argument("--exp7", action="store_true", help="Run exp7: Causal Feature Probing")
+    parser.add_argument("--exp8", action="store_true", help="Run exp8: 2B vs 9B + Low-Resource Scaling")
+    parser.add_argument("--exp9", action="store_true", help="Run exp9: Layer-wise Steering Sweep")
+    parser.add_argument("--exp10", action="store_true", help="Run exp10: Occlusion-Based Attribution Steering")
     parser.add_argument("--all", action="store_true", help="Run all experiments")
     
     args = parser.parse_args()
@@ -273,6 +344,27 @@ Examples:
     
     if args.exp3:
         run_exp3()
+
+    if args.exp6:
+        run_exp6()
+
+    if args.exp7:
+        run_exp7()
+
+    if args.exp8:
+        run_exp8()
+
+    if args.exp9:
+        run_exp9()
+
+    if args.exp10:
+        print("\n" + "=" * 60)
+        print("EXPERIMENT 10: Occlusion-Based Attribution Steering")
+        print("=" * 60)
+        print("Goal: Attribution-selected steering via feature occlusion")
+        print("=" * 60 + "\n")
+        from experiments.exp10_attribution_occlusion import main as exp10_main
+        exp10_main()
     
     if args.all:
         run_all()

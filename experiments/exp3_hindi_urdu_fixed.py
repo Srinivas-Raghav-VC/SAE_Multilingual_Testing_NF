@@ -87,11 +87,14 @@ def identify_script_vs_semantic(
     texts_hi, 
     texts_ur, 
     layer, 
-    activation_threshold=0.05,
+    rate_threshold=0.01,  # SAME threshold as get_active_features
     ratio_threshold=0.5
 ) -> Dict[str, Set[int]]:
     """
     Identify script-specific vs semantic features for Hindi-Urdu.
+    
+    FIXED: Now uses activation RATES (same as get_active_features) for consistency.
+    This ensures semantic_ratio <= 1.0 always.
     
     Script features: Activate strongly for ONE language (script-dependent)
     Semantic features: Activate similarly for BOTH (meaning-dependent)
@@ -102,26 +105,30 @@ def identify_script_vs_semantic(
     sae = model.load_sae(layer)
     n_features = sae.cfg.d_sae
     
-    # Compute mean activations for each language
-    hi_acts = []
-    for text in texts_hi[:100]:  # Use subset for efficiency
+    # Compute activation RATES (not means!) - same as get_active_features
+    hi_counts = torch.zeros(n_features, device=model.device)
+    hi_tokens = 0
+    for text in texts_hi[:100]:
         acts = model.get_sae_activations(text, layer)
-        hi_acts.append(acts.mean(dim=0))
-    hi_mean = torch.stack(hi_acts).mean(dim=0)
+        hi_counts += (acts > 0).float().sum(dim=0)
+        hi_tokens += acts.shape[0]
+    hi_rates = hi_counts / hi_tokens
     
-    ur_acts = []
+    ur_counts = torch.zeros(n_features, device=model.device)
+    ur_tokens = 0
     for text in texts_ur[:100]:
         acts = model.get_sae_activations(text, layer)
-        ur_acts.append(acts.mean(dim=0))
-    ur_mean = torch.stack(ur_acts).mean(dim=0)
+        ur_counts += (acts > 0).float().sum(dim=0)
+        ur_tokens += acts.shape[0]
+    ur_rates = ur_counts / ur_tokens
     
-    # Features that activate for each language
-    hi_active = hi_mean > activation_threshold
-    ur_active = ur_mean > activation_threshold
+    # Features active for each language (using SAME threshold)
+    hi_active = hi_rates > rate_threshold
+    ur_active = ur_rates > rate_threshold
     
-    # Semantic: Active for BOTH with similar magnitude
+    # Semantic: Active for BOTH with similar activation rates
     both_active = hi_active & ur_active
-    ratio = hi_mean / (ur_mean + 1e-10)
+    ratio = hi_rates / (ur_rates + 1e-10)
     similar_magnitude = (ratio > ratio_threshold) & (ratio < 1/ratio_threshold)
     semantic_mask = both_active & similar_magnitude
     
@@ -196,6 +203,10 @@ def main():
         total_hi_ur_features = len(hi_features | ur_features)
         semantic_ratio = len(feature_types["semantic"]) / total_hi_ur_features if total_hi_ur_features > 0 else 0
         script_ratio = (len(feature_types["hi_script"]) + len(feature_types["ur_script"])) / total_hi_ur_features if total_hi_ur_features > 0 else 0
+        
+        # VALIDATION: These ratios should NEVER exceed 1.0
+        assert semantic_ratio <= 1.0, f"BUG: semantic_ratio={semantic_ratio:.3f} > 1.0 at layer {layer}"
+        assert script_ratio <= 1.0, f"BUG: script_ratio={script_ratio:.3f} > 1.0 at layer {layer}"
         
         print(f"\nScript vs Semantic breakdown:")
         print(f"  Semantic features: {len(feature_types['semantic'])} ({semantic_ratio:.1%} of union)")

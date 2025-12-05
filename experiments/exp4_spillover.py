@@ -164,14 +164,32 @@ def compute_steering_vector(model, texts_target, texts_source, layer):
 
 def run_spillover_experiment(
     model,
-    steering_vector,
+    steering_vector_features,
     layer,
     prompts: List[str],
     strengths: List[float],
     target_lang: str = "hi"
 ) -> Dict[float, SpilloverResult]:
-    """Run steering at different strengths (or None for baseline), measure language distribution."""
+    """Run steering at different strengths (or None for baseline), measure language distribution.
+    
+    Args:
+        model: GemmaWithSAE model
+        steering_vector_features: Steering vector in SAE FEATURE space (16384 dims)
+        layer: Layer to steer
+        prompts: Prompts to test
+        strengths: Steering strengths
+        target_lang: Target language code
+    """
     results = {}
+    
+    # CRITICAL: Convert steering vector from SAE feature space (16384) to hidden space (2304)
+    # The SAE decoder maps features -> hidden states
+    sae = model.load_sae(layer)
+    
+    # Project through decoder: (16384,) -> (2304,)
+    # The decoder is W_dec with shape (d_sae, d_model) = (16384, 2304)
+    steering_vector_hidden = sae.decode(steering_vector_features.unsqueeze(0)).squeeze(0)
+    print(f"  Steering vector converted: {steering_vector_features.shape} -> {steering_vector_hidden.shape}")
     
     # Test each strength (including 0.0 for baseline)
     test_strengths = [0.0] + list(strengths)
@@ -185,9 +203,9 @@ def run_spillover_experiment(
                 # Baseline: no steering
                 output = model.generate(prompt, max_new_tokens=64)
             else:
-                # With steering
+                # With steering (using hidden-space vector)
                 output = model.generate_with_steering(
-                    prompt, layer, steering_vector, strength
+                    prompt, layer, steering_vector_hidden, strength
                 )
             
             # Detect output language

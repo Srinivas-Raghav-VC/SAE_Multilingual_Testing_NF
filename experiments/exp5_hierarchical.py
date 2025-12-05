@@ -445,6 +445,8 @@ def main():
     print("FEATURE LABELING (Gemini)")
     print("=" * 60)
     
+    all_labels: List[FeatureLabel] = []
+    
     if GOOGLE_API_KEY or os.environ.get("GOOGLE_API_KEY"):
         # Select top features from late layers (where steering works best)
         late_analysis = [a for a in layer_analyses if a.layer >= 20]
@@ -461,6 +463,7 @@ def main():
                 labels = label_features_with_gemini(
                     model, features_to_label, all_texts, max_features=5
                 )
+                all_labels.extend(labels)
                 
                 print(f"\nLabeled {len(labels)} features:")
                 for label in labels:
@@ -493,6 +496,17 @@ def main():
         ],
         "feature_flow": {k: v[:20] for k, v in flow.items()},  # Truncate for JSON
         "hierarchy_summary": viz_data.get("hierarchy_summary", {}),
+        "feature_labels": [
+            {
+                "layer": lbl.layer,
+                "feature_idx": lbl.feature_idx,
+                "label": lbl.label,
+                "description": lbl.description,
+                "languages": lbl.languages,
+                "confidence": lbl.confidence,
+            }
+            for lbl in all_labels
+        ],
     }
     
     with open(output_dir / "exp5_hierarchical_analysis.json", "w") as f:
