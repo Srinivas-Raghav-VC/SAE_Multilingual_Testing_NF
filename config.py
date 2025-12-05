@@ -20,8 +20,8 @@ HIDDEN_DIM = 2304
 SAE_RELEASE = "gemma-scope-2b-pt-res"
 SAE_WIDTH = "16k"
 
-# Attention implementation
-ATTN_IMPLEMENTATION = "eager"  # or "eager"
+# Attention implementation (use "eager" for compatibility)
+ATTN_IMPLEMENTATION = "eager"  # "flash_attention_2" requires specific GPU/driver
 
 # =============================================================================
 # TARGET LAYERS

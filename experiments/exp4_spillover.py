@@ -11,6 +11,11 @@ Hypothesis (H4 Language Clustering):
 This tests whether language families cluster in SAE steering space.
 """
 
+# Path fix for running from experiments/ directory
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import json
 from pathlib import Path

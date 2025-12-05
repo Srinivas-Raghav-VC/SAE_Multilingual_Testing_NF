@@ -8,6 +8,11 @@ H3: Mid-layers (40-60% of model depth) contain most language-specific features
     Falsification: Peak density outside this range
 """
 
+# Path fix for running from experiments/ directory
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import json
 from tqdm import tqdm

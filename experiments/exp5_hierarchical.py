@@ -18,6 +18,11 @@ Key outputs:
 - Gemini-labeled top features per language
 """
 
+# Path fix for running from experiments/ directory
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import json
 import os

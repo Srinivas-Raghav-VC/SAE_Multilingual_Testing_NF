@@ -16,6 +16,11 @@ Methods compared:
 4. Dense: Mean activation difference in hidden space (no SAE)
 """
 
+# Path fix for running from experiments/ directory
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import json
 from tqdm import tqdm
