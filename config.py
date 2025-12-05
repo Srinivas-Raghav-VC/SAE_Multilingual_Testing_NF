@@ -21,7 +21,7 @@ SAE_RELEASE = "gemma-scope-2b-pt-res"
 SAE_WIDTH = "16k"
 
 # Attention implementation
-ATTN_IMPLEMENTATION = "flash_attention_2"  # or "eager"
+ATTN_IMPLEMENTATION = "eager"  # or "eager"
 
 # =============================================================================
 # TARGET LAYERS
