@@ -19,10 +19,12 @@ from tqdm import tqdm
 from pathlib import Path
 
 from config import (
-    LANGUAGES, TARGET_LAYERS, MONOLINGUALITY_THRESHOLD,
+    LANGUAGES,
+    TARGET_LAYERS,
+    MONOLINGUALITY_THRESHOLD,
     N_SAMPLES_DISCOVERY,
 )
-from data import load_flores
+from data import load_flores, load_samanantar_multilingual
 from model import GemmaWithSAE
 
 
@@ -139,10 +141,51 @@ def main():
     model = GemmaWithSAE()
     model.load_model()
     
-    # Load data
-    print("Loading FLORES-200...")
-    texts_by_lang = load_flores(max_samples=N_SAMPLES_DISCOVERY)
-    print(f"Loaded {len(next(iter(texts_by_lang.values())))} samples per language")
+    # Load data for feature discovery
+    # Use Samanantar for high-resource Indic languages where available,
+    # and FLORES for the remaining languages (including controls).
+    print("Loading data for feature discovery...")
+    
+    # Indic languages covered by Samanantar and used in this experiment
+    samanantar_langs = ["hi", "bn", "ta", "te"]
+    texts_by_lang = {}
+    
+    print("  Loading Samanantar for Indic languages (hi, bn, ta, te)...")
+    sam_data = load_samanantar_multilingual(
+        samanantar_langs, max_samples_per_lang=N_SAMPLES_DISCOVERY
+    )
+    
+    # Fill Indic languages from Samanantar
+    for lang in samanantar_langs:
+        if lang in sam_data and sam_data[lang]:
+            texts_by_lang[lang] = sam_data[lang]
+    
+    # Ensure we have English; prefer Samanantar English if present
+    if "en" in sam_data and sam_data["en"]:
+        texts_by_lang["en"] = sam_data["en"]
+    
+    # Load remaining languages from FLORES (including Urdu + controls)
+    flores_langs = {}
+    for lang, flores_code in LANGUAGES.items():
+        if lang in texts_by_lang:
+            continue
+        flores_langs[lang] = flores_code
+    
+    if flores_langs:
+        print("  Loading FLORES-200 for remaining languages...")
+        flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, languages=flores_langs)
+        for lang, sents in flores.items():
+            texts_by_lang[lang] = sents
+    
+    # Sanity check: ensure we have at least the core languages
+    missing = [lang for lang in LANGUAGES.keys() if lang not in texts_by_lang]
+    if missing:
+        print(f"WARNING: Missing languages in feature discovery data: {missing}")
+    
+    # Log sample sizes
+    print("Sample counts per language for feature discovery:")
+    for lang in sorted(texts_by_lang.keys()):
+        print(f"  {lang}: {len(texts_by_lang[lang])} sentences")
     
     # Run discovery
     results = run_feature_discovery(model, texts_by_lang, TARGET_LAYERS)

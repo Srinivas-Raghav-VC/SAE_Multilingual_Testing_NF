@@ -237,6 +237,18 @@ def run_exp9():
     run_layer_sweep()
 
 
+def run_exp11():
+    """Run Experiment 11: Calibrated Gemini Judge."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 11: Calibrated LLM-as-Judge Evaluation (Gemini)")
+    print("=" * 60)
+    print("Goal: Calibrate Gemini judge for Hindi and German steering")
+    print("=" * 60 + "\n")
+    
+    from experiments.exp11_judge_calibration import main as exp11_main
+    exp11_main()
+
+
 def run_all():
     """Run all core experiments sequentially, then generate plots."""
     print("\n" + "=" * 60)
@@ -254,6 +266,7 @@ def run_all():
         ("exp8_scaling_9b_low_resource", run_exp8),
         ("exp9_layer_sweep_steering", run_exp9),
         ("exp10_attribution_occlusion", lambda: __import__("experiments.exp10_attribution_occlusion", fromlist=["main"]).main()),
+        ("exp11_judge_calibration", run_exp11),
     ]
     
     results = {}
@@ -315,6 +328,7 @@ Examples:
     parser.add_argument("--exp8", action="store_true", help="Run exp8: 2B vs 9B + Low-Resource Scaling")
     parser.add_argument("--exp9", action="store_true", help="Run exp9: Layer-wise Steering Sweep")
     parser.add_argument("--exp10", action="store_true", help="Run exp10: Occlusion-Based Attribution Steering")
+    parser.add_argument("--exp11", action="store_true", help="Run exp11: Calibrated LLM-as-Judge Evaluation")
     parser.add_argument("--all", action="store_true", help="Run all experiments")
     
     args = parser.parse_args()
@@ -365,6 +379,9 @@ Examples:
         print("=" * 60 + "\n")
         from experiments.exp10_attribution_occlusion import main as exp10_main
         exp10_main()
+    
+    if args.exp11:
+        run_exp11()
     
     if args.all:
         run_all()
