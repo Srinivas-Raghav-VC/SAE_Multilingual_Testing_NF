@@ -110,6 +110,17 @@ def run_layer_sweep():
     targets = ["hi", "bn", "ta", "te", "ur", "de", "ar"]
     methods = ["dense", "activation_diff", "monolinguality", "random"]
 
+    # Map language code to target script name used in evaluation_comprehensive.SCRIPT_RANGES
+    lang_to_script = {
+        "hi": "devanagari",
+        "ur": "arabic",
+        "bn": "bengali",
+        "ta": "tamil",
+        "te": "telugu",
+        "de": "latin",
+        "ar": "arabic",
+    }
+
     # Load model (2B base with residual SAEs)
     model = GemmaWithSAE()
     model.load_model()
@@ -169,10 +180,14 @@ def run_layer_sweep():
                                 # Use LLM judge if available; semantic model optional
                                 use_llm_judge=True,
                                 compute_semantics=True,
+                                target_script=lang_to_script.get(target, "devanagari"),
                             )
                         )
 
-                    agg = aggregate_results(outputs)
+                    agg = aggregate_results(
+                        outputs,
+                        target_script=lang_to_script.get(target, "devanagari"),
+                    )
                     method_results[str(strength)] = {
                         "n_samples": agg.n_samples,
                         "success_rate_script": agg.success_rate,
@@ -200,4 +215,3 @@ def run_layer_sweep():
 
 if __name__ == "__main__":
     run_layer_sweep()
-

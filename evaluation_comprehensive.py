@@ -132,9 +132,14 @@ class CalibratedJudgeResult:
 
 @dataclass
 class AggregateResults:
-    """Aggregated results across multiple evaluations."""
+    """Aggregated results across multiple evaluations.
+
+    Note: avg_target_script_ratio is defined with respect to a caller-specified
+    target script (e.g. Devanagari for Hindi, Bengali for bn, etc.). Callers
+    should pass the correct target_script when calling aggregate_results.
+    """
     n_samples: int
-    success_rate: float                   # Script-based
+    success_rate: float                    # Script-based (is_target_script)
     semantic_success_rate: Optional[float] # Script + semantic
     
     avg_target_script_ratio: float
@@ -618,8 +623,19 @@ def evaluate_steering_output(
     )
 
 
-def aggregate_results(results: List[SteeringEvalResult]) -> AggregateResults:
-    """Aggregate evaluation results."""
+def aggregate_results(
+    results: List[SteeringEvalResult],
+    target_script: str = "devanagari",
+) -> AggregateResults:
+    """Aggregate evaluation results.
+
+    Args:
+        results: List of SteeringEvalResult objects.
+        target_script: Script name to use when computing
+            avg_target_script_ratio. This should match the target language
+            for the steering experiment, e.g. "devanagari" for Hindi,
+            "bengali" for Bengali, "tamil" for Tamil, etc.
+    """
     if not results:
         return AggregateResults(
             n_samples=0, success_rate=0.0, semantic_success_rate=None,
@@ -633,7 +649,7 @@ def aggregate_results(results: List[SteeringEvalResult]) -> AggregateResults:
     script_success = sum(1 for r in results if r.is_target_script) / n
     
     # Target script ratio
-    target_ratios = [r.script_ratios.get("devanagari", 0) for r in results]
+    target_ratios = [r.script_ratios.get(target_script, 0.0) for r in results]
     
     # Semantic
     sem_values = [r.semantic_similarity for r in results if r.semantic_similarity >= 0]

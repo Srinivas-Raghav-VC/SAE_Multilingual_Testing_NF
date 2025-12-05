@@ -249,6 +249,18 @@ def run_exp11():
     exp11_main()
 
 
+def run_exp12():
+    """Run Experiment 12: QA Degradation Under Steering."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 12: QA Degradation Under Steering")
+    print("=" * 60)
+    print("Goal: Measure how EN→target steering affects MLQA/IndicQA performance")
+    print("=" * 60 + "\n")
+    
+    from experiments.exp12_qa_degradation import main as exp12_main
+    exp12_main()
+
+
 def run_all():
     """Run all core experiments sequentially, then generate plots."""
     print("\n" + "=" * 60)
@@ -267,6 +279,7 @@ def run_all():
         ("exp9_layer_sweep_steering", run_exp9),
         ("exp10_attribution_occlusion", lambda: __import__("experiments.exp10_attribution_occlusion", fromlist=["main"]).main()),
         ("exp11_judge_calibration", run_exp11),
+        ("exp12_qa_degradation", run_exp12),
     ]
     
     results = {}
@@ -329,6 +342,7 @@ Examples:
     parser.add_argument("--exp9", action="store_true", help="Run exp9: Layer-wise Steering Sweep")
     parser.add_argument("--exp10", action="store_true", help="Run exp10: Occlusion-Based Attribution Steering")
     parser.add_argument("--exp11", action="store_true", help="Run exp11: Calibrated LLM-as-Judge Evaluation")
+    parser.add_argument("--exp12", action="store_true", help="Run exp12: QA Degradation Under Steering")
     parser.add_argument("--all", action="store_true", help="Run all experiments")
     
     args = parser.parse_args()
@@ -382,6 +396,9 @@ Examples:
     
     if args.exp11:
         run_exp11()
+    
+    if args.exp12:
+        run_exp12()
     
     if args.all:
         run_all()
