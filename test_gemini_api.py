@@ -11,6 +11,7 @@ Requirements:
 
 import json
 import os
+import re
 
 import google.generativeai as genai
 
@@ -33,6 +34,12 @@ def main() -> None:
 
     print("\nRaw response:")
     print(text)
+
+    # Strip markdown code fences like ```json ... ```
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        if text.endswith("```"):
+            text = text[:-3].strip()
 
     try:
         data = json.loads(text)
