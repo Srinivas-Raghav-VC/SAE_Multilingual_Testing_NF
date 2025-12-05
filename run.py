@@ -307,6 +307,17 @@ def run_all():
         print("✓ Plot generation invoked (see results/figures)")
     except Exception as e:
         print(f"✗ Plot generation failed: {e}")
+
+    # Generate text summary report
+    print("\n" + "=" * 60)
+    print("GENERATING SUMMARY REPORT")
+    print("=" * 60)
+    try:
+        import subprocess
+        subprocess.run(["python", "summarize_results.py"], check=False)
+        print("✓ Summary report generated (see results/summary_report.txt)")
+    except Exception as e:
+        print(f"✗ Summary report generation failed: {e}")
     
     # Summary
     print("\n" + "=" * 60)
