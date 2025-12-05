@@ -22,15 +22,18 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 # MODEL CONFIGURATION
 # ============================================================================
 MODEL_NAME = "google/gemma-2-2b"
+MODEL_ID = MODEL_NAME  # Alias for backward compatibility
 SAE_RELEASE = "gemma-scope-2b-pt-res-canonical"
 N_LAYERS = 26
 HIDDEN_DIM = 2304
 SAE_WIDTH = 16384
+ATTN_IMPLEMENTATION = "flash_attention_2"  # or "eager" if no flash attention
 
 # For 9B model (set USE_9B_MODEL = True to switch)
 USE_9B_MODEL = False
 if USE_9B_MODEL:
     MODEL_NAME = "google/gemma-2-9b"
+    MODEL_ID = MODEL_NAME
     SAE_RELEASE = "gemma-scope-9b-pt-res-canonical"
     N_LAYERS = 42
     HIDDEN_DIM = 3584
