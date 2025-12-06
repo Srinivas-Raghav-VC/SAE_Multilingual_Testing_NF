@@ -131,6 +131,47 @@ where $\bar{h}_\ell(x)$ denotes the mean of $H_\ell(x)$ over tokens. In the SAE-
 \end{equation}
 which averages the decoder directions of selected features. Occlusion-based attribution (Exp10, Exp13) instead uses the SAE to \emph{ablate} individual or grouped features by encoding $h_{\ell,t}$, zeroing selected coordinates in $z_{\ell,t}$, and decoding back to a modified $\hat{h}_{\ell,t}$.
 
+We will use the terms \emph{detector} and \emph{generator} feature in a precise, operational sense.
+
+\paragraph{Detector features.}
+Intuitively, a feature behaves as a detector for language $T$ if it reliably \emph{fires when text is in $T$ and remains mostly silent otherwise}. Formally, we treat the monolinguality score $M_{\ell,j}(T)$ from \eqref{eq:monolinguality} as a \emph{detection score}: features with high $M_{\ell,j}(T)$ and non-trivial activation rate on $T$ are \emph{language-selective detectors}. Exp1 and Exp3 analyse detector structure by:
+\begin{itemize}
+  \item counting strongly $T$-selective features ($M_{\ell,j}(T) > 3$) per layer, and
+  \item comparing overlaps of active detector sets across languages via $J_\ell(L_1,L_2)$ in \eqref{eq:jaccard}.
+\end{itemize}
+These quantities are purely \emph{correlational}: they say when a feature is \emph{present}, not what happens if we change it.
+
+\paragraph{Generator features.}
+By contrast, a feature behaves as a generator for language $T$ if \emph{increasing its activation causally pushes the model toward generating $T$}. We formalize this via single-feature steering and occlusion. For a feature $(\ell,j)$ with decoder direction $w_{\ell,j}$, consider the intervention
+\begin{equation}
+  h_{\ell,t}^{(+)} \;=\; h_{\ell,t} + \alpha w_{\ell,j}, \qquad
+  h_{\ell,t}^{(-)} \;=\; h_{\ell,t} - \alpha w_{\ell,j},
+  \label{eq:single-feature-steer}
+\end{equation}
+for a small $\alpha > 0$, applied during generation. Let $y^{(+)}$ and $y^{(-)}$ be the corresponding completions for a prompt $x$, and let $S_T(y)$ denote a scalar \emph{language score} for $T$ (e.g., the fraction of alphabetic characters in the target script, or an indicator that the output passes our script-dominance test). We define a \emph{generator score} for $(\ell,j)$ with respect to $T$ as
+\begin{equation}
+  G_{\ell,j}(T) \;=\;
+  \mathbb{E}_{x \sim \mathcal{P}}\bigl[ S_T\bigl(y^{(+)}(x)\bigr) - S_T\bigl(y^{(-)}(x)\bigr) \bigr],
+  \label{eq:generator-score}
+\end{equation}
+where the expectation is over a prompt distribution $\mathcal{P}$ (e.g., FLORES prompts). In words, $G_{\ell,j}(T)$ measures how much nudging feature $j$ up versus down changes the tendency of the model to produce language $T$. In practice (Exp7), we approximate \eqref{eq:generator-score} using a finite set of prompts and script-based success indicators.
+
+Occlusion-based attribution in Exp10 provides a complementary, ablation-style generator score. For feature $(\ell,j)$ we define
+\begin{equation}
+  A_{\ell,j}(T) \;=\;
+  \mathbb{E}_{x \sim \mathcal{P}}
+  \bigl[ S_T(y(x)) - S_T(\tilde{y}_{-j}(x)) \bigr],
+  \label{eq:attribution-score}
+\end{equation}
+where $y(x)$ is the baseline completion and $\tilde{y}_{-j}(x)$ is the completion when we encode $h_{\ell,t}$ through the SAE, set $z_{\ell,t,j}\!=\!0$ for all $t$, and decode back before continuing the forward pass. A large positive $A_{\ell,j}(T)$ means that \emph{removing} feature $j$ reduces the model's ability to generate $T$; such features are strong candidates for inclusion in attribution-based steering sets $S_\ell^{\mathrm{attr}}(T,k)$.
+
+In this paper we use:
+\begin{itemize}
+  \item high-$M_{\ell,j}(T)$ features as \emph{detectors} for language $T$ (Exp1, Exp3, Exp5, Exp6), and
+  \item high-$G_{\ell,j}(T)$ or high-$A_{\ell,j}(T)$ features as \emph{generators} for $T$ (Exp2, Exp4, Exp7, Exp8, Exp9, Exp10, Exp15, Exp16),
+\end{itemize}
+with thresholds chosen empirically. This detector/generator distinction clarifies why monolinguality-based feature sets can be excellent for analysis yet poor for steering: detectors tell us \emph{when} a language is present, whereas generators tell us \emph{how to make it appear}.  
+
 For evaluation, we combine several metrics. Script dominance is computed via Unicode-based script ratios over generated text. Semantic preservation is measured using LaBSE cosine similarity between prompt or gold-answer embeddings and generated outputs. Degradation is quantified via $n$-gram repetition rates (e.g., 3-gram and 5-gram). Finally, a calibrated Gemini-based LLM-as-judge provides language, faithfulness, and coherence scores with bias-corrected accuracy estimates~\cite{krumdick2025nofreelabels}. Subsequent sections instantiate these formal ingredients for each experiment.
 
 We study the following grouped hypotheses:

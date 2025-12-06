@@ -188,6 +188,16 @@ def run_exp3():
     from experiments.exp3_hindi_urdu_fixed import main
     main()
 
+def run_exp4():
+    """Run Experiment 4: Language Steering Spillover Analysis."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT 4: Language Steering Spillover Analysis")
+    print("=" * 60)
+    print("Goal: Measure how EN→HI steering spills over to other languages")
+    print("=" * 60 + "\n")
+
+    from experiments.exp4_spillover import main as exp4_main
+    exp4_main()
 
 def run_exp6():
     """Run Experiment 6: Script vs Semantics Controls."""
@@ -399,6 +409,7 @@ Examples:
     parser.add_argument("--exp1", action="store_true", help="Run exp1: Feature Discovery")
     parser.add_argument("--exp2", action="store_true", help="Run exp2: Steering Comparison")
     parser.add_argument("--exp3", action="store_true", help="Run exp3: Hindi-Urdu Overlap")
+    parser.add_argument("--exp4", action="store_true", help="Run exp4: Language Steering Spillover")
     parser.add_argument("--exp6", action="store_true", help="Run exp6: Script vs Semantics Controls")
     parser.add_argument("--exp7", action="store_true", help="Run exp7: Causal Feature Probing")
     parser.add_argument("--exp8", action="store_true", help="Run exp8: 2B vs 9B + Low-Resource Scaling")
@@ -439,6 +450,9 @@ Examples:
     
     if args.exp3:
         run_exp3()
+
+    if args.exp4:
+        run_exp4()
 
     if args.exp6:
         run_exp6()
