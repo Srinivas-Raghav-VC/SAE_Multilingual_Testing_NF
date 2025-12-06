@@ -34,33 +34,39 @@ class GemmaWithSAE:
         self.sae_release = sae_release
     
     def load_model(self):
-        """Load the base Gemma model."""
+        """Load the base Gemma model on a single device.
+
+        We intentionally avoid ``device_map='auto'`` here because the
+        experiments register custom hooks and expect all parameters and
+        activations to live on the same device. On the user's A100 40GB,
+        Gemma 2 2B and 9B comfortably fit in bf16 or fp32.
+        """
         print(f"Loading {self.model_id}...")
-        
+
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_id,
-            token=HF_TOKEN if HF_TOKEN else None
+            token=HF_TOKEN if HF_TOKEN else None,
         )
-        
-        # Configure based on available hardware
+
+        # Configure attention implementation and dtype.
         model_kwargs = {
             "torch_dtype": self.dtype,
-            "device_map": "auto",
         }
-        
-        # Try flash attention if available
         try:
             if self.device == "cuda":
                 model_kwargs["attn_implementation"] = ATTN_IMPLEMENTATION
         except Exception:
-            print("Flash attention not available, using default")
-        
+            print("Attention implementation config failed, using default.")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_id,
             token=HF_TOKEN if HF_TOKEN else None,
-            **model_kwargs
+            **model_kwargs,
         )
-        
+
+        # Move the entire model to the chosen device to avoid CPU/CUDA
+        # mismatches in later experiments.
+        self.model.to(self.device)
         self.model.eval()
         print(f"Model loaded on {self.device}.")
         return self
@@ -165,14 +171,16 @@ class GemmaWithSAE:
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Ensure steering vector is on correct device
-        steering_vector = steering_vector.to(self.device).to(self.dtype)
+        # Ensure steering vector is on correct device and dtype
+        steering_vector = steering_vector.to(self.device)
         
         def hook(module, input, output):
             """Add steering to hidden states during forward pass."""
             hidden = output[0] if isinstance(output, tuple) else output
-            # Add steering: shape (batch, seq, hidden) + (hidden,) broadcast
-            steered = hidden + strength * steering_vector.unsqueeze(0).unsqueeze(0)
+            # Work in the same dtype as the hidden states to avoid
+            # float/bfloat16 mismatches downstream.
+            steer_vec = steering_vector.to(hidden.dtype)
+            steered = hidden + strength * steer_vec.unsqueeze(0).unsqueeze(0)
             return (steered,) + output[1:] if isinstance(output, tuple) else steered
         
         # Register hook on target layer

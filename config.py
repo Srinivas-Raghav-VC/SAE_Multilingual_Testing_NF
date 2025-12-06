@@ -85,6 +85,8 @@ EXTENDED_LANGUAGES = {
     "es": "spa_Latn",
     "ar": "arb_Arab",
     "zh": "zho_Hans",
+    # Additional low-resource / control
+    "vi": "vie_Latn",
 }
 
 TARGET_LANGUAGE = "hi"

@@ -132,39 +132,58 @@ def get_language_family(lang: str) -> str:
 
 
 def compute_steering_vector(model, texts_target, texts_source, layer):
-    """Compute activation-diff steering vector."""
+    """Compute an EN→HI steering vector in hidden space.
+
+    For consistency with Exp2, we:
+      1. Compute activation differences in SAE feature space.
+      2. Select the top-|NUM_FEATURES| features by *positive* difference
+         (more active for target than source).
+      3. Form a hidden-space vector as a weighted combination of the
+         corresponding decoder directions, normalised to a standard
+         magnitude.
+    """
     sae = model.load_sae(layer)
-    
+
     # Get mean activations for target language
     target_acts = []
     for text in texts_target[:100]:
         acts = model.get_sae_activations(text, layer)
         target_acts.append(acts.mean(dim=0))
     target_mean = torch.stack(target_acts).mean(dim=0)
-    
+
     # Get mean activations for source language
     source_acts = []
     for text in texts_source[:100]:
         acts = model.get_sae_activations(text, layer)
         source_acts.append(acts.mean(dim=0))
     source_mean = torch.stack(source_acts).mean(dim=0)
-    
-    # Steering direction
+
+    # Difference: positive values correspond to features more active for target.
     diff = target_mean - source_mean
-    
-    # Select top-k features by difference magnitude
-    _, top_indices = torch.abs(diff).topk(NUM_FEATURES)
-    
-    # Create sparse steering vector
-    steering_vector = torch.zeros_like(diff)
-    steering_vector[top_indices] = diff[top_indices]
-    
-    return steering_vector
+    diff_clamped = torch.clamp(diff, min=0.0)
+
+    # Select top-k features by positive difference.
+    if (diff_clamped > 0).sum() == 0:
+        # Fallback: if everything is zero, just return a zero vector.
+        return torch.zeros(sae.cfg.d_in, device=model.device)
+
+    _, top_indices = diff_clamped.topk(NUM_FEATURES)
+
+    # Weighted combination of decoder directions.
+    directions = sae.W_dec[top_indices, :]  # (k, d_model)
+    weights = diff_clamped[top_indices].unsqueeze(1)  # (k, 1)
+    vec = (weights * directions).sum(dim=0)
+
+    # Normalise to have comparable scale to other steering vectors.
+    if vec.norm() > 0:
+        vec = vec / vec.norm() * (sae.cfg.d_in ** 0.5)
+
+    return vec
 
 
 def run_spillover_experiment(
     model,
-    steering_vector_features,
+    steering_vector_hidden,
     layer,
     prompts: List[str],
     strengths: List[float],
@@ -181,15 +200,6 @@ def run_spillover_experiment(
         target_lang: Target language code
     """
     results = {}
-    
-    # CRITICAL: Convert steering vector from SAE feature space (16384) to hidden space (2304)
-    # The SAE decoder maps features -> hidden states
-    sae = model.load_sae(layer)
-    
-    # Project through decoder: (16384,) -> (2304,)
-    # The decoder is W_dec with shape (d_sae, d_model) = (16384, 2304)
-    steering_vector_hidden = sae.decode(steering_vector_features.unsqueeze(0)).squeeze(0)
-    print(f"  Steering vector converted: {steering_vector_features.shape} -> {steering_vector_hidden.shape}")
     
     # Test each strength (including 0.0 for baseline)
     test_strengths = [0.0] + list(strengths)

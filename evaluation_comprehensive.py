@@ -586,14 +586,24 @@ def evaluate_steering_output(
     
     # LLM judge
     llm_lang = llm_faith = llm_coh = 0.0
-    llm_raw = None
+    llm_raw: Optional[Any] = None
     
     if use_llm_judge:
-        llm_raw = llm_judge_gemini(prompt, output)
-        if llm_raw:
-            llm_lang = llm_raw.get("language", 0)
-            llm_faith = llm_raw.get("faithfulness", 0)
-            llm_coh = llm_raw.get("coherence", 0)
+        raw = llm_judge_gemini(prompt, output)
+        # Gemini sometimes returns a top-level list or other structures;
+        # we defensively convert to a single dict if possible.
+        if isinstance(raw, list) and raw:
+            candidate = raw[0]
+        elif isinstance(raw, dict):
+            candidate = raw
+        else:
+            candidate = None
+        llm_raw = raw
+
+        if isinstance(candidate, dict):
+            llm_lang = candidate.get("language", 0)
+            llm_faith = candidate.get("faithfulness", 0)
+            llm_coh = candidate.get("coherence", 0)
     
     # Overall success: target script + not degraded + semantics OK (if computed)
     success = is_target and not degraded

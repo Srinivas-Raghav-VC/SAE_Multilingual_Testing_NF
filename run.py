@@ -100,9 +100,9 @@ def validate_setup():
         print(f"   ✗ Model module error: {e}")
         checks.append(False)
     
-    # 5. Check experiment modules
+    # 5. Check experiment modules (smoke-test main() entrypoints)
     print("\n5. Checking experiment modules...")
-    for exp_name in ["exp1_feature_discovery", "exp2_steering", "exp3_hindi_urdu"]:
+    for exp_name in ["exp1_feature_discovery", "exp2_steering", "exp3_hindi_urdu_fixed"]:
         try:
             module = __import__(f"experiments.{exp_name}", fromlist=["main"])
             if hasattr(module, "main"):

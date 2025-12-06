@@ -119,11 +119,14 @@ def load_flores(
     
     for short_code, flores_code in languages.items():
         try:
+            # Newer versions of `datasets` deprecate `trust_remote_code` for
+            # Hub-hosted datasets. We rely on the locally cached FLORES-200
+            # data; if it is unavailable, this will raise and we fall back to
+            # an empty list for that language.
             ds = load_dataset(
                 "facebook/flores",
                 flores_code,
                 split=split,
-                trust_remote_code=True
             )
             sentences = list(ds["sentence"])
             
@@ -164,12 +167,10 @@ def load_samanantar(
         Tuple of (english_sentences, target_sentences)
     """
     try:
-        ds = load_dataset(
-            "ai4bharat/samanantar",
-            lang,
-            split=split,
-            trust_remote_code=True
-        )
+        # We rely on locally cached Samanantar data. If the Hub loader
+        # requires a script and `datasets` refuses to execute it, this call
+        # will fail and we fall back to empty lists.
+        ds = load_dataset("ai4bharat/samanantar", lang, split=split)
         
         # Samanantar has 'src' (English) and 'tgt' (target language)
         en_sentences = list(ds["src"])
@@ -305,12 +306,10 @@ def load_indicqa(
     
     for lang in languages:
         try:
-            ds = load_dataset(
-                "ai4bharat/IndicQA",
-                f"indicqa.{lang}",
-                split="test",
-                trust_remote_code=True
-            )
+            # As with Samanantar, we prefer cached data and avoid
+            # `trust_remote_code` to keep compatibility with recent
+            # `datasets` versions.
+            ds = load_dataset("ai4bharat/IndicQA", f"indicqa.{lang}", split="test")
             
             examples = []
             for i, item in enumerate(ds):
@@ -419,18 +418,20 @@ def load_research_data(
     }
     test_data = load_flores(max_test_samples, flores_codes)
     
-    # If using FLORES for both, ensure no overlap
-    if not use_samanantar:
-        # Take different slices
-        for lang in train_data:
-            if lang in test_data:
-                # First 80% for train, last 20% for test
-                all_sents = train_data[lang] + test_data[lang]
-                all_sents = list(set(all_sents))  # Dedupe
-                random.shuffle(all_sents)
-                split_idx = int(len(all_sents) * 0.8)
-                train_data[lang] = all_sents[:split_idx]
-                test_data[lang] = all_sents[split_idx:]
+    # Ensure train / test are disjoint wherever possible to avoid leakage.
+    # We do this regardless of whether Samanantar or FLORES is used for
+    # training: any sentence that appears in the test split is removed from
+    # the corresponding training split.
+    for lang in list(train_data.keys()):
+        if lang in test_data:
+            test_set = set(test_data[lang])
+            if not test_set:
+                continue
+            orig_len = len(train_data[lang])
+            train_data[lang] = [s for s in train_data[lang] if s not in test_set]
+            if len(train_data[lang]) < orig_len:
+                removed = orig_len - len(train_data[lang])
+                print(f"  [dedupe] Removed {removed} overlapping {lang} sentences from train.")
     
     # ----- EVALUATION DATA -----
     print("\n3. Loading EVALUATION data (QA)...")

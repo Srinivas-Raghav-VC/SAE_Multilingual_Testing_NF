@@ -70,6 +70,11 @@ def ablate_feature_in_hidden(
         z = sae.encode(hs)  # (b*s, d_sae)
         z[:, feature_idx] = 0.0
         h_abl = sae.decode(z)  # (b*s, d_model)
+
+    # Ensure the ablated hidden states have the same dtype/device as the
+    # original hidden states, otherwise later linear layers (which are
+    # typically in bf16) will see a dtype mismatch.
+    h_abl = h_abl.to(hidden.dtype).to(hidden.device)
     return h_abl.view(b, s, d)
 
 
@@ -282,4 +287,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
