@@ -73,24 +73,36 @@ def gpu_free_memory_mb() -> Tuple[bool, int]:
     If nvidia-smi is not available or something goes wrong, returns (False, 0).
     """
     try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
+        # First try a modern nvidia-smi invocation (no units in output).
+        cmds = [
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            # Fallback for older nvidia-smi versions that don't support 'nounits'.
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader"],
+        ]
+        for cmd in cmds:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # In a MIG setup this will usually be a single line; we use the first.
+                line = result.stdout.strip().splitlines()[0]
+                # If units are present (e.g. "1234 MiB"), take the first token.
+                token = line.strip().split()[0]
+                free_mb = int(token)
+                return True, free_mb
+
+        # If we get here, all invocations failed.
+        sys.stderr.write(
+            "[smart_run] nvidia-smi invocation failed. stderr was:\n"
+            f"{result.stderr}\n"
         )
-        if result.returncode != 0:
-            return False, 0
-        # In a MIG setup this will usually be a single line; we use the first.
-        line = result.stdout.strip().splitlines()[0]
-        free_mb = int(line.strip())
-        return True, free_mb
-    except Exception:
+        return False, 0
+    except Exception as e:
+        sys.stderr.write(f"[smart_run] Exception while calling nvidia-smi: {e}\n")
         return False, 0
 
 
