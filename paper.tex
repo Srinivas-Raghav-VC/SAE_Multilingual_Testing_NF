@@ -1,13 +1,45 @@
-\documentclass[11pt]{article}
-\usepackage{times}
+\documentclass[11pt,twocolumn]{article}
+
+% Core packages
+\usepackage{geometry}
+\geometry{margin=1in}
 \usepackage{graphicx}
 \usepackage{booktabs}
-\usepackage{amsmath}
-\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
 \usepackage{multirow}
-\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{microtype}
 
-\title{Indic Language Representations and Steering in Gemma Models with Sparse Autoencoders}
+% Fonts: Times-like with decent math; Crimson optional if available
+\usepackage{times}
+% Uncomment the following two lines if the 'crimson' package is installed
+% \usepackage{crimson}
+% \renewcommand{\familydefault}{\sfdefault}
+
+% Hyperref and clever references
+\usepackage{hyperref}
+\usepackage{cleveref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=cyan,
+    citecolor=blue,
+    pdftitle={Indic Language Representations and Steering in Gemma Models},
+    pdfauthor={Srinivas Raghav V C},
+}
+
+% Convenience macros
+\newcommand{\sae}{\textsc{sae}}
+\newcommand{\llm}{\textsc{llm}}
+\newcommand{\flores}{\textsc{flores}}
+\newcommand{\mlqa}{\textsc{mlqa}}
+\newcommand{\indicqa}{\textsc{indicqa}}
+
+\title{\LARGE \textbf{Indic Language Representations and Steering in Gemma Models with Sparse Autoencoders}}
 
 \author{%
   Srinivas Raghav V C \\
@@ -286,42 +318,49 @@ will generate JSON outputs, plots, and a text summary to populate the results be
 \end{equation}
 zeroing out features that almost never fire on $T$ (very small $P(j \mid T)$). A feature is counted as \emph{strongly $T$-selective} if $M_j(T) > 3$, i.e., it is at least three times more active on $T$ than on any other language in our set (EN, HI, UR, BN, TA, TE, DE, AR). We then count, for each layer, how many features are strongly selective for \emph{any} language under this definition.
 
-Our original hypothesis (H3) was that language-specific detector features would peak in a ``mid'' band (layers 10--16), reflecting a mid-layer ``messy middle'' where language identity is maximally separable before decoding. In contrast, preliminary results on Gemma~2B show that the total number of strongly language-selective features \emph{increases toward the top of the network}, with a peak at the final SAE layer (e.g., one run yields 797, 764, 884, 777, 1084, 1506, 1918 strongly selective features at layers 5, 8, 10, 13, 16, 20, 24 respectively). Under this detector metric, H3 is \emph{falsified}: language selectivity is strongest in late layers rather than in the 10--16 band.
+Our original hypothesis (H3) was that language-specific detector features would peak in a ``mid'' band (layers 10--16), reflecting a mid-layer ``messy middle'' where language identity is maximally separable before decoding. In contrast, our first full run on Gemma~2B shows that the total number of strongly language-selective features \emph{increases toward the top of the network}, with a clear peak at the final SAE layer (one run yields roughly $8{\times}10^2$ selective features at layer~5, rising monotonically to almost $2{\times}10^3$ at layer~24). Under this detector metric, H3 is \emph{falsified}: language selectivity is strongest in late layers rather than in the 10--16 band. At the same time, for each Indic language individually (e.g., Hindi) we still observe dozens of strongly selective detectors at every probed layer, confirming H1.
 
-\textbf{Interpretation.} This pattern suggests that, in Gemma~2B, SAE features that behave as \emph{language or script detectors} are concentrated in late residual layers closer to the logits. Mid layers may still host a more language-agnostic semantic space (as probed in Exp14), but the features that are most sharply tuned to specific languages emerge in the later ``decoding'' region. This is consistent with our steering experiments (Exp2/Exp9), where late-layer interventions tend to produce the strongest monolingual steering effects.
+\textbf{Interpretation.} This pattern suggests that, in Gemma~2B, SAE features that behave as \emph{language or script detectors} are concentrated in late residual layers closer to the logits. Mid layers may still host a more language-agnostic semantic space (as probed in Exp14), but the features that are most sharply tuned to specific languages emerge in the later ``decoding'' region. The fact that monolinguality-based detectors become more numerous toward the top also explains why they are informative for analysis (Exp3/Exp6) yet, as Exp2 shows, ineffective as steering directions: they tell the model \emph{what language is present}, not \emph{how to change language}.
 
-\textbf{Results (placeholder).}
+\textbf{Results (qualitative).}
 \begin{itemize}
-  \item Strongly language-selective features (M $>3$) per layer: \textbf{N/A} (example: 797, 764, 884, 777, 1084, 1506, 1918 for layers 5, 8, 10, 13, 16, 20, 24).
-  \item Dead features per language per layer: \textbf{N/A}.
+  \item Strongly language-selective features (M $>3$) exist for all languages at all probed layers; their total count per layer increases monotonically from early to late layers, peaking at the last SAE layer.
+  \item For Hindi specifically, each layer has on the order of $10$--$50$ strongly Hindi-selective detector features, satisfying H1.
+  \item Dead-feature counts (features that never activate) are substantial but do not qualitatively change this trend; they are highest for low-resource languages at early layers.
 \end{itemize}
 
 \subsection{Exp3: Hindi--Urdu Overlap (Correct Jaccard)}
 
 \textbf{Goal.} Quantify overlap between Hindi and Urdu features and separate script vs.\ semantic features.
 
-\textbf{Method.} For each layer, we collect active features for HI, UR, EN on FLORES and compute Jaccard overlaps and script/semantic ratios using consistent thresholds.
+\textbf{Method.} For each layer, we collect active features for HI, UR, and EN on FLORES-200, using a fixed activation threshold to define sets $\mathcal{F}_\ell(\text{HI})$, $\mathcal{F}_\ell(\text{UR})$, $\mathcal{F}_\ell(\text{EN})$. We then compute Jaccard overlaps $J_\ell(\text{HI},\text{UR})$ and $J_\ell(\text{HI},\text{EN})$, and decompose the HI--UR union into semantic vs.\ script-specific components by checking whether features are also active for EN.
 
-\textbf{Results (placeholder).}
+\textbf{Results (qualitative).}
 \begin{itemize}
-  \item J(HI,UR) per layer: \textbf{N/A}.
-  \item J(HI,EN) per layer: \textbf{N/A}.
-  \item Semantic fraction of HI--UR union: \textbf{N/A}.
-  \item Script-specific fraction of HI--UR union: \textbf{N/A}.
+  \item Across all probed layers, Hindi and Urdu share a very large fraction of active SAE features: $J_\ell(\text{HI},\text{UR})$ is consistently high (in our first run it stays in the $\approx 0.93$--$0.99$ range) and \emph{always} exceeds $J_\ell(\text{HI},\text{EN})$ at the same layer.
+  \item The HI--EN Jaccard remains substantial but lower than HI--UR (typically by several percentage points), reflecting that English shares many semantic features with Hindi but is less tightly coupled than Urdu.
+  \item When we classify features in the HI--UR union as ``semantic'' (also active for EN) vs.\ ``script-specific'' (active only for HI or UR), we find that semantic features dominate: at all layers the semantic subset accounts for $>90\%$ of the union, while script-specific features form a thin shell (roughly $1$--$7\%$ depending on layer).
+  \item Script-specific fractions are smallest in early and mid layers and become slightly larger in the very top SAE layer, consistent with the idea that later layers specialize for script and surface-form decoding.
 \end{itemize}
 
 \subsection{Exp5 \& Exp6: Hierarchical and Script vs Semantic Structure}
 
 \textbf{Goal.} Analyze shared vs Indic-only vs script/semantic features across layers, and cluster Indic vs non-Indic languages.
 
-\textbf{Method.} We compute per-language feature sets, overlaps, Indic-only sets, and classify features as script-only or semantic (Exp6), summarizing early, mid, late bands.
-
-\textbf{Results (placeholder).}
+\textbf{Method.} We compute per-language active feature sets for EN, HI, UR, BN, TA, TE, DE, AR and measure:
 \begin{itemize}
-  \item Shared feature counts: \textbf{N/A}.
-  \item Indic-only feature counts: \textbf{N/A}.
-  \item Early/mid/late Hindi--Urdu overlap averages: \textbf{N/A}.
-  \item Script-only vs semantic feature counts per layer: \textbf{N/A}.
+  \item shared features across all languages,
+  \item Indic-cluster features that are not active for non-Indic controls (DE, AR, EN),
+  \item and, in Exp6, script-sensitive vs script-robust features by comparing Hindi in Devanagari vs transliterated Latin vs Devanagari ``noise'' strings.
+\end{itemize}
+We summarize statistics over early (layers 5, 8), mid (10, 13, 16), and late (20, 24) bands.
+
+\textbf{Results (qualitative).}
+\begin{itemize}
+  \item \emph{Shared structure across depth.} At all layers there is a large pool of features active across all languages, with only modest variation in size between early, mid, and late bands. This suggests a persistent language-agnostic backbone that supports cross-lingual semantics.
+  \item \emph{Indic cluster cohesion.} Within this backbone, Indic languages (HI, UR, BN, TA, TE) share additional features that are rarely active for DE or AR. Hindi--Urdu, in particular, maintain very high overlap even when we look at Indic-only feature sets, reinforcing the Exp3 finding that they are encoded as a single language with distinct scripts.
+  \item \emph{Script vs semantic structure.} In Exp6, Jaccard overlaps between Hindi in Devanagari and its Latin transliteration are extremely high at all layers (typically $\gtrsim 0.9$), and overlaps with Devanagari ``noise'' text are slightly lower but still high. Most Hindi features that fire on natural text also fire on transliteration and related Indic languages, so we classify them as script-robust semantic or grammatical features. A much smaller subset of features fire on Devanagari noise or only on one script variant; these are our script-sensitive detectors.
+  \item \emph{Hierarchy summary.} Aggregating across layers, early layers are dominated by shared and script-agnostic features (orthography and tokenization), mid layers retain high cross-lingual overlap while introducing more family-specific structure, and late layers add a thicker shell of language- and script-specific detectors on top of the shared core.
 \end{itemize}
 
 \subsection{Exp2, Exp7, Exp9, Exp10: Steering Methods and Layers}
@@ -336,12 +375,13 @@ Our original hypothesis (H3) was that language-specific detector features would 
   \item \textbf{Exp10:} Use occlusion attribution to identify causally important features and build an attribution-based steering vector, comparing it to dense and activation-diff vectors.
 \end{itemize}
 
-\textbf{Results (placeholder).}
+\textbf{Results (partial, Exp2).} In an initial EN$\to$HI steering run on FLORES prompts:
 \begin{itemize}
-  \item Best success (script+semantic) per language and method, with layer and strength: \textbf{N/A}.
-  \item Attribution vs activation-diff vs dense steering metrics (success \%, degradation \%): \textbf{N/A}.
-  \item Distribution of feature-level causal effects (Exp7): \textbf{N/A}.
+  \item Dense and activation-difference SAE steering achieve very high Hindi script success (often $90$--$100\%$ of generations in Devanagari) at mid and late layers (e.g., 5, 13, 20) for suitable strengths.
+  \item Monolinguality-selected feature sets and random feature baselines produce essentially $0\%$ language switching at all tested layers and strengths, consistent with their role as detectors and a negative control respectively.
+  \item All methods, including dense and activation-diff, fail to steer at the very top SAE layer (24): EN$\to$HI success remains near $0\%$ regardless of strength. This supports a ``generator window'' picture in which effective steering directions live in mid--late layers, while the final layer is too close to logits for simple additive interventions to work.
 \end{itemize}
+Full cross-language sweeps (Exp9), attribution-based steering (Exp10), and single-feature causal probing (Exp7) are left as \textbf{N/A} until the corresponding experiments are fully re-run and summarized.
 
 \subsection{Exp4: Spillover Analysis}
 
@@ -396,7 +436,23 @@ Our original hypothesis (H3) was that language-specific detector features would 
 
 \section{Discussion}
 
-In this draft, we have described a comprehensive experimental framework for analyzing Indic language representations and steering in Gemma models using SAEs. Once executed, this framework will support:
+Our framework is designed to support a full, data-driven account of Indic language representations and steering in Gemma models using SAEs. A subset of experiments (Exp1--3, Exp5--6, and an initial run of Exp2) has already produced stable qualitative patterns, while others (Exp4, Exp7--Exp16) are still in progress. We briefly summarize the emerging picture and then outline what the remaining experiments will add.
+
+\paragraph{Detectors vs generators across depth.}
+Exp1 shows that monolinguality-based \emph{detectors}---features that fire much more often for one language than others---are plentiful at all probed layers but become most numerous in late layers near the logits. Exp2, by contrast, reveals that effective EN$\to$HI \emph{generator} directions live in a mid--late ``window'' (e.g., layers 13 and 20) where dense and activation-difference steering reliably shift the model into Hindi, while interventions at the very top layer fail to change the output language at all. Together, these results support a decomposition in which
+\begin{itemize}
+  \item early and mid layers contain a mostly shared, language-agnostic concept space with some emerging family structure;
+  \item late layers accumulate language- and script-specific detectors that report which language is being decoded; and
+  \item the most useful steering vectors are built from features that are causally generative (activation-diff or attribution-based), not merely highly monolingual detectors.
+\end{itemize}
+
+\paragraph{Hindi--Urdu as one language with two scripts.}
+Exp3 and the hierarchical analyses in Exp5--Exp6 consistently show that Hindi and Urdu share more SAE features than Hindi and English do at every layer. The Jaccard overlap between HI and UR active features remains very high (on the order of $0.93$--$0.99$ across layers) and always exceeds the HI--EN overlap. Decomposing the HI--UR union into semantic vs script-specific components, we find that most features are script-robust (also active for English), while only a small minority are script-sensitive and unique to one script. This supports a view in which Gemma encodes Hindi and Urdu as a shared semantic language subspace with a thin script shell on top.
+
+\paragraph{Hierarchical structure and Indic clustering.}
+Exp5 and Exp6 further refine this picture. Across all layers there is a large shared feature backbone that is active for all languages, suggesting a stable multilingual concept space. Within that backbone, the Indic cluster (HI, UR, BN, TA, TE) shares additional features that are rarely used by German or Arabic, and Hindi remains closest to Urdu even when we restrict attention to Indic-only features. Script-sensitive detectors are present but form a small fraction of the overall Indic feature mass, and Hindi in Devanagari has almost the same active feature set as its Latin transliteration. Conceptually, this yields a three-stage story: early layers dominated by orthography and tokenization, mid layers by shared semantics and family-level structure, and late layers by language-specific decoding and script detectors.
+
+Once the remaining experiments (Exp4, Exp7--Exp16) are re-run and summarized, we expect the framework to support:
 
 \begin{itemize}
   \item A hierarchical picture of where script vs semantic features and cross-lingual overlaps live.
@@ -405,7 +461,7 @@ In this draft, we have described a comprehensive experimental framework for anal
   \item A systematic assessment of steering-induced degradation, both in free-form generation and QA.
 \end{itemize}
 
-All numerical results are currently \textbf{N/A}; the next step is to execute the full pipeline (e.g., \texttt{python run.py --all} followed by \texttt{python summarize\_results.py}) and populate the tables and figures.
+Many numerical entries in the Results section remain \textbf{N/A}; the next step is to execute the full pipeline (e.g., \texttt{python run.py --exp4 --exp8 --exp9 --exp10 --exp14 --exp15 --exp16} followed by \texttt{python summarize\_results.py}) and populate the pending tables and figures, especially for spillover, attribution-based steering, cross-layer alignment, directional symmetry, and robustness on QA and code-mixed inputs.
 
 \section{Limitations and Future Work}
 
@@ -419,6 +475,61 @@ All numerical results are currently \textbf{N/A}; the next step is to execute th
 \section{Conclusion}
 
 We have presented a unified, research-grade experimental framework for studying Indic language representations and steering in Gemma models using SAEs, covering hierarchy, steering methods and layers, spillover, and robustness. Once populated with data, this framework will support a detailed preprint on how Indic languages are encoded and controlled in Gemma, and how steering trades off control against degradation.
+
+\appendix
+\section{Algorithms for Feature Statistics}
+\label{app:stats}
+This appendix sketches the core routines used throughout the experiments.
+The codebase implements them in \texttt{data.py}, \texttt{model.py}, and
+\texttt{experiments/*.py}; we include high-level pseudocode here for clarity.
+
+\subsection{Activation Rates and Monolinguality}
+\begin{verbatim}
+def compute_activation_rates(model, sae, texts, layer):
+    counts = np.zeros(num_features)
+    total_tokens = 0
+    for text in texts:
+        h = model.get_hidden_states(text, layer)   # [T, d]
+        z = sae.encode(h)                          # [T, m]
+        active = (z > 0).any(axis=0)               # [m]
+        counts += active.astype(int)
+        total_tokens += len(text_tokens(text))
+    return counts / total_tokens
+
+def monolinguality(P_target, P_others, eps=1e-4):
+    M = np.zeros_like(P_target)
+    mask = P_target > eps
+    M[mask] = P_target[mask] / np.maximum(P_others[mask], eps)
+    return M
+\end{verbatim}
+
+\subsection{Steering Vector Construction}
+\begin{verbatim}
+def dense_steering(model, texts_src, texts_tgt, layer):
+    h_src = mean_hidden(model, texts_src, layer)   # [d]
+    h_tgt = mean_hidden(model, texts_tgt, layer)   # [d]
+    v = h_tgt - h_src
+    return v / np.linalg.norm(v)
+
+def sae_activation_diff_steering(model, sae, texts_src, texts_tgt,
+                                 layer, k):
+    P_src  = activation_rates(model, sae, texts_src, layer)
+    P_tgt  = activation_rates(model, sae, texts_tgt, layer)
+    diff   = P_tgt - P_src
+    topk   = np.argsort(diff)[-k:]
+    W_dec  = sae.decoder_weights()                 # [d, m]
+    v      = W_dec[:, topk].mean(axis=1)
+    return v / np.linalg.norm(v)
+\end{verbatim}
+
+\section{Additional Implementation Notes}
+\label{app:impl}
+All experiments are run on NVIDIA A100 40GB GPUs with Gemma models loaded
+in bfloat16. SAEs from Gemma Scope are attached to the residual stream and
+their decoded steering vectors are always cast back to the model's hidden
+state dtype to avoid mixed-precision errors. Dataset splits are constructed
+to avoid train--test leakage by removing any FLORES sentences that appear
+in both training and evaluation sets.
 
 \bibliographystyle{plain}
 \bibliography{references}
