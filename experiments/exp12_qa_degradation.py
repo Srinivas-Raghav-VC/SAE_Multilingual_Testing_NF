@@ -46,6 +46,8 @@ from evaluation_comprehensive import (
     evaluate_steering_output,
     aggregate_results,
     semantic_similarity,
+    load_judge_calibration_table,
+    calibrated_judge_from_results,
 )
 
 
@@ -138,8 +140,7 @@ def run_qa_eval_for_lang(
 
         # Baseline
         base_out = model.generate(prompt, max_new_tokens=64)
-        results_baseline.append(
-            evaluate_steering_output(
+        res_base = evaluate_steering_output(
                 prompt,
                 base_out,
                 method="baseline",
@@ -150,7 +151,7 @@ def run_qa_eval_for_lang(
                 use_llm_judge=use_llm_judge,
                 compute_semantics=True,
             )
-        )
+        results_baseline.append(res_base)
 
         # Steered
         steered_out = model.generate_with_steering(
@@ -160,8 +161,7 @@ def run_qa_eval_for_lang(
             strength=steering_strength,
             max_new_tokens=64,
         )
-        results_steered.append(
-            evaluate_steering_output(
+        res_steer = evaluate_steering_output(
                 prompt,
                 steered_out,
                 method="steered",
@@ -172,10 +172,34 @@ def run_qa_eval_for_lang(
                 use_llm_judge=use_llm_judge,
                 compute_semantics=True,
             )
-        )
+        results_steered.append(res_steer)
 
     agg_base = aggregate_results(results_baseline, target_script=script)
     agg_steer = aggregate_results(results_steered, target_script=script)
+
+    # Calibrated judge summaries (if calibration stats exist for this lang).
+    cal_table = load_judge_calibration_table()
+    judge_base = calibrated_judge_from_results(
+        results_baseline, lang=target_lang, calibration_table=cal_table
+    )
+    judge_steer = calibrated_judge_from_results(
+        results_steered, lang=target_lang, calibration_table=cal_table
+    )
+
+    def _judge_dict(cj):
+        if cj is None:
+            return None
+        return {
+            "raw_accuracy": cj.raw_accuracy,
+            "corrected_accuracy": cj.corrected_accuracy,
+            "ci_low": cj.confidence_interval[0],
+            "ci_high": cj.confidence_interval[1],
+            "q0": cj.q0,
+            "q1": cj.q1,
+            "n_test": cj.n_test,
+            "n_calib_0": cj.n_calib_0,
+            "n_calib_1": cj.n_calib_1,
+        }
 
     return {
         "baseline": {
@@ -185,6 +209,7 @@ def run_qa_eval_for_lang(
             "avg_target_script_ratio": agg_base.avg_target_script_ratio,
             "avg_semantic_similarity": agg_base.avg_semantic_similarity,
             "degradation_rate": agg_base.degradation_rate,
+            "judge": _judge_dict(judge_base),
         },
         "steered": {
             "n_samples": agg_steer.n_samples,
@@ -193,6 +218,7 @@ def run_qa_eval_for_lang(
             "avg_target_script_ratio": agg_steer.avg_target_script_ratio,
             "avg_semantic_similarity": agg_steer.avg_semantic_similarity,
             "degradation_rate": agg_steer.degradation_rate,
+            "judge": _judge_dict(judge_steer),
         },
     }
 
@@ -294,4 +320,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

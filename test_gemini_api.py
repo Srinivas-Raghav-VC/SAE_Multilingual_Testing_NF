@@ -25,7 +25,8 @@ def main() -> None:
         )
 
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    # Use same model as evaluation pipeline.
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
     prompt = 'Reply ONLY with JSON: {"ok": true, "message": "Gemini API test passed"}'
     print("Sending test prompt to Gemini...")
@@ -54,4 +55,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -42,7 +42,13 @@ from experiments.exp2_steering import (
     construct_sae_steering_vector,
     construct_dense_steering_vector,
 )
-from evaluation_comprehensive import evaluate_steering_output, aggregate_results
+from evaluation_comprehensive import (
+    evaluate_steering_output,
+    aggregate_results,
+    is_gemini_available,
+    load_judge_calibration_table,
+    calibrated_judge_from_results,
+)
 
 
 @dataclass
@@ -94,6 +100,13 @@ def run_layer_sweep():
     print("EXPERIMENT 9: Layer-wise Steering Sweep with LLM Judge")
     print("=" * 60)
 
+    # Ensure Gemini judge is actually available before we attempt to use it.
+    # If not, we abort with a clear message: for this experiment, LLM-as-judge
+    # is a core part of the design.
+    if not is_gemini_available():
+        print("[exp9] Gemini judge unavailable; aborting Exp9 to avoid running a half-configured sweep.")
+        return
+
     # Load research data (Samanantar + FLORES + QA + prompts)
     data_split = load_research_data(
         max_train_samples=N_SAMPLES_DISCOVERY,
@@ -126,6 +139,9 @@ def run_layer_sweep():
     model.load_model()
 
     all_results: Dict[str, Dict] = {}
+    # For calibrated judge summaries, we keep a per-language pool of
+    # SteeringEvalResult objects that actually have judge outputs.
+    judge_pools: Dict[str, List] = {t: [] for t in targets}
 
     for target in targets:
         if target not in train or "en" not in train:
@@ -170,19 +186,22 @@ def run_layer_sweep():
                             strength=strength,
                             max_new_tokens=64,
                         )
-                        outputs.append(
-                            evaluate_steering_output(
+                        res = evaluate_steering_output(
                                 p,
                                 gen,
                                 method=method,
                                 strength=strength,
                                 layer=layer,
-                                # Use LLM judge if available; semantic model optional
+                                # LLM judge is required for this experiment
                                 use_llm_judge=True,
                                 compute_semantics=True,
                                 target_script=lang_to_script.get(target, "devanagari"),
+                                judge_lang=target,
                             )
-                        )
+                        outputs.append(res)
+                        # Store for calibrated judge summary later.
+                        if res.llm_judge_raw is not None:
+                            judge_pools.setdefault(target, []).append(res)
 
                     agg = aggregate_results(
                         outputs,
@@ -211,6 +230,33 @@ def run_layer_sweep():
         json.dump(all_results, f, indent=2)
 
     print(f"\n✓ Results saved to {out_path}")
+
+    # ------------------------------------------------------------------
+    # Calibrated judge summary per language (reusing Exp11 statistics)
+    # ------------------------------------------------------------------
+    cal_table = load_judge_calibration_table()
+    judge_summary: Dict[str, Dict] = {}
+    for lang, pool in judge_pools.items():
+        cj = calibrated_judge_from_results(pool, lang=lang, calibration_table=cal_table)
+        if cj is None:
+            continue
+        judge_summary[lang] = {
+            "raw_accuracy": cj.raw_accuracy,
+            "corrected_accuracy": cj.corrected_accuracy,
+            "ci_low": cj.confidence_interval[0],
+            "ci_high": cj.confidence_interval[1],
+            "q0": cj.q0,
+            "q1": cj.q1,
+            "n_test": cj.n_test,
+            "n_calib_0": cj.n_calib_0,
+            "n_calib_1": cj.n_calib_1,
+        }
+
+    if judge_summary:
+        js_path = out_dir / "exp9_layer_sweep_judge_summary.json"
+        with open(js_path, "w") as f:
+            json.dump({"languages": judge_summary}, f, indent=2)
+        print(f"✓ Calibrated judge summary saved to {js_path}")
 
 
 if __name__ == "__main__":

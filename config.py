@@ -227,7 +227,8 @@ SEED = 42
 
 # Environment
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+# Support both GOOGLE_API_KEY and GEMINI_API_KEY environment variable names.
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY", "")
 
 # =============================================================================
 # HELPER

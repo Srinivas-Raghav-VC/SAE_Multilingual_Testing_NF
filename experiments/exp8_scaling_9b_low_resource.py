@@ -169,12 +169,29 @@ def main():
 
     for cfg in model_variants:
         print(f"\n=== Model: {cfg.name} ===")
+
+        # Try to load on GPU first; if that fails (e.g., shared GPU is OOM),
+        # fall back to CPU so we still get scaling numbers, just slower.
+        model = None
         try:
-            model = GemmaWithSAE(model_id=cfg.model_id, sae_release=cfg.sae_release)
+            model = GemmaWithSAE(
+                model_id=cfg.model_id,
+                sae_release=cfg.sae_release,
+            )
             model.load_model()
         except Exception as e:
-            print(f"  Skipping {cfg.name}: could not load model/SAE ({e})")
-            continue
+            print(f"  GPU load failed for {cfg.name}: {e}")
+            print("  Retrying on CPU for scaling analysis (may be slow).")
+            try:
+                model = GemmaWithSAE(
+                    device="cpu",
+                    model_id=cfg.model_id,
+                    sae_release=cfg.sae_release,
+                )
+                model.load_model()
+            except Exception as e2:
+                print(f"  Skipping {cfg.name}: could not load model/SAE on CPU either ({e2})")
+                continue
 
         model_results = {"feature_counts": {}, "steering": {}}
 

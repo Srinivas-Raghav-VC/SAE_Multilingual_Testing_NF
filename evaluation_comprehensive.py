@@ -37,9 +37,9 @@ from config import (
 )
 
 
-# =============================================================================
+###############################################################################
 # SEMANTIC MODEL (LaBSE)
-# =============================================================================
+###############################################################################
 
 _SEMANTIC_MODEL_CACHE: Dict[str, Any] = {}
 
@@ -317,49 +317,132 @@ def dice_overlap(set_a: Set, set_b: Set) -> float:
     return 2 * len(set_a & set_b) / (len(set_a) + len(set_b))
 
 
-# =============================================================================
+###############################################################################
 # LLM-AS-JUDGE WITH CALIBRATION (Lee et al., 2025)
-# =============================================================================
+###############################################################################
 
-JUDGE_PROMPT = """You are evaluating a language model output for Hindi language steering.
+# Mapping from language code to human-readable description used in the
+# judge prompt. This keeps the prompt grounded for each language while
+# letting callers reuse the same underlying judge function.
+LANG_JUDGE_CONFIG = {
+    "hi": {"name": "Hindi", "script": "Devanagari"},
+    "ur": {"name": "Urdu", "script": "Arabic script"},
+    "bn": {"name": "Bengali", "script": "Bengali script"},
+    "ta": {"name": "Tamil", "script": "Tamil script"},
+    "te": {"name": "Telugu", "script": "Telugu script"},
+    "de": {"name": "German", "script": "Latin alphabet"},
+    "ar": {"name": "Arabic", "script": "Arabic script"},
+}
 
-**Original prompt:** {prompt}
-**Model output:** {output}
 
-Score EACH on a scale of 1-5:
+JUDGE_PROMPT = """You are evaluating a language model output for steering into a target language.
 
-1. **Language** (1=not Hindi, 3=mixed/broken, 5=fluent Hindi in Devanagari)
-2. **Faithfulness** (1=unrelated to prompt, 5=perfectly addresses the prompt)
-3. **Coherence** (1=nonsense/repetitive, 5=perfectly coherent)
+Target language: {lang_name} ({script_name})
 
-Respond with ONLY JSON (no markdown):
-{{"language": 1-5, "faithfulness": 1-5, "coherence": 1-5, "is_hindi": true/false, "brief": "one sentence"}}"""
+Original prompt:
+{prompt}
+
+Model output:
+{output}
+
+Score EACH on a scale of 1–5:
+
+1. **Language** (1 = not {lang_name} / wrong script,
+                 3 = mixed or broken {lang_name},
+                 5 = fluent {lang_name} in {script_name})
+2. **Faithfulness** (1 = unrelated to prompt, 5 = fully answers the prompt)
+3. **Coherence** (1 = nonsense or highly repetitive, 5 = coherent and readable)
+
+Respond with ONLY JSON (no markdown), e.g.:
+{{"language": 1-5, "faithfulness": 1-5, "coherence": 1-5,
+  "is_target_language": true/false, "brief": "one sentence justification"}}"""
 
 
-def llm_judge_gemini(prompt: str, output: str, api_key: str = None) -> Optional[Dict]:
-    """Use Gemini as judge. Returns scores or None on failure."""
-    api_key = api_key or GOOGLE_API_KEY or os.environ.get("GOOGLE_API_KEY", "")
-    
+_GEMINI_AVAILABLE: Optional[bool] = None
+
+
+def is_gemini_available() -> bool:
+    """Lightweight runtime check that Gemini API is usable.
+
+    We check once per process and cache the result. This avoids the pattern
+    where an experiment silently runs with `use_llm_judge=True` but every
+    call fails due to a missing/invalid API key.
+    """
+    global _GEMINI_AVAILABLE
+    if _GEMINI_AVAILABLE is not None:
+        return _GEMINI_AVAILABLE
+
+    api_key = GOOGLE_API_KEY or os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        return None
-    
+        print("[eval] No Gemini API key found (GOOGLE_API_KEY / GEMINI_API_KEY). LLM judge disabled.")
+        _GEMINI_AVAILABLE = False
+        return False
+
     try:
         import google.generativeai as genai
-        
+
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        
-        response = model.generate_content(JUDGE_PROMPT.format(prompt=prompt, output=output))
+        # Use the latest fast Gemini model for judging.
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        # Minimal sanity call; we don't care about the content, only that it
+        # does not raise.
+        _ = model.generate_content("Ping from SAE-Multilingual-Steering evaluation.")
+        _GEMINI_AVAILABLE = True
+        print("[eval] Gemini API check succeeded; LLM judge enabled.")
+        return True
+    except Exception as e:
+        print(f"[eval] Gemini API check failed: {e}")
+        _GEMINI_AVAILABLE = False
+        return False
+
+
+def llm_judge_gemini(
+    prompt: str,
+    output: str,
+    api_key: str = None,
+    lang_code: str = "hi",
+) -> Optional[Dict]:
+    """Use Gemini as judge. Returns scores or None on failure.
+
+    This function assumes `is_gemini_available()` has been called at least
+    once in the current process. If no API key is available or the check
+    failed, this function will simply return None.
+    """
+    api_key = (
+        api_key
+        or GOOGLE_API_KEY
+        or os.environ.get("GOOGLE_API_KEY", "")
+        or os.environ.get("GEMINI_API_KEY", "")
+    )
+
+    if not api_key or _GEMINI_AVAILABLE is False:
+        return None
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        cfg = LANG_JUDGE_CONFIG.get(lang_code, LANG_JUDGE_CONFIG["hi"])
+        response = model.generate_content(
+            JUDGE_PROMPT.format(
+                prompt=prompt,
+                output=output,
+                lang_name=cfg["name"],
+                script_name=cfg["script"],
+            )
+        )
         text = response.text.strip()
-        
+
         # Strip markdown fences
         if text.startswith("```"):
             text = re.sub(r"```\w*\n?", "", text).strip()
             if text.endswith("```"):
                 text = text[:-3].strip()
-        
+
         return json.loads(text)
-    
+
     except Exception as e:
         print(f"[eval] LLM judge error: {e}")
         return None
@@ -548,6 +631,107 @@ def evaluate_with_calibrated_judge(
 
 
 # =============================================================================
+# CALIBRATION TABLE HELPERS (re-use q0, q1 across experiments)
+# =============================================================================
+
+_JUDGE_CALIBRATION_TABLE: Optional[Dict[str, Dict[str, float]]] = None
+
+
+def load_judge_calibration_table(
+    path: str = "results/exp11_judge_calibration.json",
+) -> Dict[str, Dict[str, float]]:
+    """Load per-language judge calibration stats from Exp11.
+
+    Returns a mapping:
+        lang -> {q0, q1, n_calib_0, n_calib_1}
+
+    If the file is missing or malformed, returns an empty dict.
+    """
+    global _JUDGE_CALIBRATION_TABLE
+    if _JUDGE_CALIBRATION_TABLE is not None:
+        return _JUDGE_CALIBRATION_TABLE
+
+    table: Dict[str, Dict[str, float]] = {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        langs = data.get("languages", {})
+        for lang, stats in langs.items():
+            if not isinstance(stats, dict):
+                continue
+            q0 = stats.get("q0")
+            q1 = stats.get("q1")
+            n0 = stats.get("n_calib_0")
+            n1 = stats.get("n_calib_1")
+            if None in (q0, q1, n0, n1):
+                continue
+            table[lang] = {
+                "q0": float(q0),
+                "q1": float(q1),
+                "n_calib_0": int(n0),
+                "n_calib_1": int(n1),
+            }
+    except FileNotFoundError:
+        print("[eval] Judge calibration file not found; calibrated summaries will be unavailable.")
+    except Exception as e:
+        print(f"[eval] Error loading judge calibration file: {e}")
+
+    _JUDGE_CALIBRATION_TABLE = table
+    return table
+
+
+def calibrated_judge_from_results(
+    results: List[SteeringEvalResult],
+    lang: str,
+    calibration_table: Dict[str, Dict[str, float]],
+    success_threshold: int = 3,
+) -> Optional[CalibratedJudgeResult]:
+    """Compute calibrated judge accuracy for a set of results.
+
+    This reuses (q0, q1, n_calib_0, n_calib_1) estimated once in Exp11 for
+    `lang` and applies bias_adjusted_estimator / confidence_interval on the
+    judge decisions stored in the provided SteeringEvalResults.
+    """
+    if not results:
+        return None
+
+    stats = calibration_table.get(lang)
+    if not stats:
+        return None
+
+    q0 = stats["q0"]
+    q1 = stats["q1"]
+    m0 = stats["n_calib_0"]
+    m1 = stats["n_calib_1"]
+
+    preds: List[bool] = []
+    for r in results:
+        # If no judge result was recorded, skip this sample.
+        if r.llm_judge_raw is None:
+            continue
+        preds.append(r.llm_language_score >= success_threshold)
+
+    if not preds:
+        return None
+
+    n = len(preds)
+    p_hat = sum(preds) / n
+    theta_hat = bias_adjusted_estimator(p_hat, q0, q1)
+    ci = confidence_interval(p_hat, q0, q1, n, m0, m1)
+
+    return CalibratedJudgeResult(
+        raw_accuracy=p_hat,
+        corrected_accuracy=theta_hat,
+        confidence_interval=ci,
+        q0=q0,
+        q1=q1,
+        n_test=n,
+        n_calib_0=m0,
+        n_calib_1=m1,
+    )
+
+
+# =============================================================================
 # COMPREHENSIVE EVALUATION
 # =============================================================================
 
@@ -561,6 +745,7 @@ def evaluate_steering_output(
     target_script: str = "devanagari",
     use_llm_judge: bool = False,
     compute_semantics: bool = True,
+    judge_lang: Optional[str] = None,
 ) -> SteeringEvalResult:
     """Comprehensive evaluation of a single steered output."""
     
@@ -589,7 +774,7 @@ def evaluate_steering_output(
     llm_raw: Optional[Any] = None
     
     if use_llm_judge:
-        raw = llm_judge_gemini(prompt, output)
+        raw = llm_judge_gemini(prompt, output, lang_code=judge_lang or "hi")
         # Gemini sometimes returns a top-level list or other structures;
         # we defensively convert to a single dict if possible.
         if isinstance(raw, list) and raw:

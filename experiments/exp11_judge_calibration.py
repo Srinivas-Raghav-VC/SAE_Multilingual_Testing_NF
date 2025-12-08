@@ -118,7 +118,9 @@ def run_calibration_for_language(lang: str, layer: int = 20, strength: float = 2
     calib_result = evaluate_with_calibrated_judge(
         test_outputs=test_outputs,
         calibration_set=calibration_set,
-        judge_fn=llm_judge_gemini,
+        # Wrap the judge so it always uses the correct target language in
+        # the prompt (important for multilingual calibration).
+        judge_fn=lambda p, o: llm_judge_gemini(p, o, lang_code=lang),
         success_threshold=3,  # language score ≥3 counts as judge "correct"
     )
     
@@ -135,7 +137,9 @@ def main():
     layer = 20 if 20 in TARGET_LAYERS else TARGET_LAYERS[-1]
     strength = 2.0
     
-    target_langs = ["hi", "de"]
+    # Languages for which we want calibrated judge stats. These cover the
+    # languages where we currently use Gemini in other experiments.
+    target_langs = ["hi", "ur", "bn", "ta", "te", "de", "ar"]
     results = {}
     
     for lang in target_langs:
@@ -175,4 +179,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

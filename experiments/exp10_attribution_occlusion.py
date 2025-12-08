@@ -43,7 +43,12 @@ from experiments.exp2_steering import (
     construct_sae_steering_vector,
     construct_dense_steering_vector,
 )
-from evaluation_comprehensive import evaluate_steering_output, aggregate_results
+from evaluation_comprehensive import (
+    evaluate_steering_output,
+    aggregate_results,
+    load_judge_calibration_table,
+    calibrated_judge_from_results,
+)
 
 
 @dataclass
@@ -223,6 +228,9 @@ def main():
     # Step 4: steering evaluation
     print("\nEvaluating steering vectors...")
     steering_results: Dict[str, Dict] = {}
+    # For calibrated judge, collect all results (Hindi target language).
+    cal_table = load_judge_calibration_table()
+    all_results_for_judge: List = []
 
     for name, vec in methods.items():
         outputs = []
@@ -248,10 +256,14 @@ def main():
                         layer=layer,
                         compute_semantics=True,
                         use_llm_judge=True,
+                        judge_lang="hi",
                     )
                 )
 
         agg = aggregate_results(outputs)
+        all_results_for_judge.extend(
+            [r for r in outputs if r.llm_judge_raw is not None]
+        )
         steering_results[name] = {
             "n_samples": agg.n_samples,
             "success_rate_script": agg.success_rate,
@@ -259,6 +271,24 @@ def main():
             "avg_target_script_ratio": agg.avg_target_script_ratio,
             "avg_semantic_similarity": agg.avg_semantic_similarity,
             "degradation_rate": agg.degradation_rate,
+        }
+
+    # Optional calibrated judge summary across all steering runs.
+    judge_summary = None
+    cj = calibrated_judge_from_results(
+        all_results_for_judge, lang="hi", calibration_table=cal_table
+    )
+    if cj is not None:
+        judge_summary = {
+            "raw_accuracy": cj.raw_accuracy,
+            "corrected_accuracy": cj.corrected_accuracy,
+            "ci_low": cj.confidence_interval[0],
+            "ci_high": cj.confidence_interval[1],
+            "q0": cj.q0,
+            "q1": cj.q1,
+            "n_test": cj.n_test,
+            "n_calib_0": cj.n_calib_0,
+            "n_calib_1": cj.n_calib_1,
         }
 
     # Save results
@@ -277,6 +307,7 @@ def main():
                     for s in scores
                 ],
                 "steering_results": steering_results,
+                "judge_summary": judge_summary,
             },
             f,
             indent=2,
