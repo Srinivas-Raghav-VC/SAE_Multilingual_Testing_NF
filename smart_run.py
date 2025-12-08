@@ -92,7 +92,22 @@ def gpu_free_memory_mb() -> Tuple[bool, int]:
                 line = result.stdout.strip().splitlines()[0]
                 # If units are present (e.g. "1234 MiB"), take the first token.
                 token = line.strip().split()[0]
-                free_mb = int(token)
+                try:
+                    free_mb = int(token)
+                except ValueError:
+                    # Some institutional setups print messages like
+                    # "[Insufficient Permissions]" instead of a number even
+                    # though nvidia-smi is present. In that case, we assume
+                    # that a GPU exists but we cannot read its free memory.
+                    # To avoid forcing everything onto CPU, treat this as
+                    # "GPU available with unknown free memory" and return a
+                    # large sentinel value.
+                    sys.stderr.write(
+                        f"[smart_run] Could not parse free memory token '{token}'. "
+                        "Assuming GPU is present but free memory is unknown; "
+                        "treating as sufficiently free.\n"
+                    )
+                    return True, 10**9
                 return True, free_mb
 
         # If we get here, all invocations failed.
