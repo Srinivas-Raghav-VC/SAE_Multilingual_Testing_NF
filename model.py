@@ -169,9 +169,46 @@ class GemmaWithSAE:
         Returns:
             Generated text (including prompt)
         """
+        if self.model is None:
+            raise ValueError("Base model has not been loaded. Call load_model() first.")
+
+        # Sanity‑check the target layer index against the underlying
+        # transformer stack. This prevents silent failures where a hook
+        # is registered on a non‑existent layer.
+        try:
+            num_layers = len(self.model.model.layers)
+        except AttributeError:
+            raise RuntimeError(
+                "Expected self.model.model.layers to be the transformer "
+                "block stack, but this attribute was not found."
+            )
+        if not (0 <= layer < num_layers):
+            raise ValueError(
+                f"Requested layer {layer} is out of range for this model "
+                f"(valid: 0–{num_layers-1})."
+            )
+
+        # Optional but cheap sanity check: ensure the steering vector matches
+        # the model's hidden size so that broadcasting behaves as intended.
+        expected_dim = getattr(self.model.config, "hidden_size", None)
+        if expected_dim is not None and steering_vector.shape[-1] != expected_dim:
+            raise ValueError(
+                f"steering_vector has trailing dimension {steering_vector.shape[-1]}, "
+                f"but model.hidden_size={expected_dim}."
+            )
+
+        # Check for zero or near-zero steering vector (silent failure risk)
+        if torch.norm(steering_vector.float()) < 1e-6:
+            import warnings
+            warnings.warn(
+                "Steering vector has near-zero norm. "
+                "Generation will proceed without effective steering."
+            )
+
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
-        # Ensure steering vector is on correct device and dtype
+        # Ensure steering vector is on correct device; dtype is aligned with
+        # the hidden states inside the hook.
         steering_vector = steering_vector.to(self.device)
         
         def hook(module, input, output):

@@ -123,12 +123,23 @@ def main():
     texts_by_lang = {lang: flores.get(lang, []) for lang in LANGS}
 
     # Basic sanity check
+    lengths = {}
     for lang in LANGS:
         n = len(texts_by_lang[lang])
+        lengths[lang] = n
         print(f"  {lang}: {n} sentences")
         if n == 0:
             print("ERROR: Missing FLORES data for language:", lang)
             return
+    # For FLORES dev/test splits the sentences are parallel by index; we
+    # assert this here so that cross-lingual alignment is meaningful. If
+    # this assertion fails, it likely indicates a data loading issue.
+    unique_lengths = set(lengths.values())
+    if len(unique_lengths) != 1:
+        raise RuntimeError(
+            f"[exp14] Expected parallel FLORES sets with equal length, "
+            f"but got lengths={lengths}"
+        )
 
     max_sentences = min(500, N_SAMPLES_DISCOVERY)
 
@@ -160,4 +171,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

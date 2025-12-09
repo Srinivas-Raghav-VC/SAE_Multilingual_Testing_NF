@@ -230,6 +230,13 @@ def main():
     steering_results: Dict[str, Dict] = {}
     # For calibrated judge, collect all results (Hindi target language).
     cal_table = load_judge_calibration_table()
+    if not cal_table:
+        print(
+            "[exp10] Warning: no judge calibration statistics found. "
+            "Structural metrics are still computed, but the calibrated "
+            "judge summary will be skipped. Run Exp11 first if you need "
+            "calibrated Gemini scores."
+        )
     all_results_for_judge: List = []
 
     for name, vec in methods.items():

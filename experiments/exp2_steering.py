@@ -33,7 +33,7 @@ from config import (
     N_SAMPLES_DISCOVERY,
     N_SAMPLES_EVAL,
 )
-from data import load_flores, load_parallel_pairs
+from data import load_research_data
 from model import GemmaWithSAE
 
 
@@ -159,31 +159,38 @@ def main():
     model = GemmaWithSAE()
     model.load_model()
     
-    # Load data
-    print("Loading data...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
-    texts_en = flores["en"]
-    texts_hi = flores["hi"]
+    # Load data via unified research loader so that:
+    # - training texts (for steering vectors) come from the train split
+    #   (Samanantar + FLORES, deduped against test),
+    # - evaluation prompts come from held-out FLORES EN + EVAL_PROMPTS.
+    print("Loading research data for Exp2 (steering sanity check)...")
+    data_split = load_research_data()
+    train_data = data_split.train
+    texts_en = train_data.get("en", [])
+    texts_hi = train_data.get("hi", [])
+    prompts_all = data_split.steering_prompts
     
-    # Test prompts (English prompts to steer toward Hindi)
-    test_prompts = [
-        "The capital of India is",
-        "My favorite food is",
-        "Today the weather is",
-        "I want to learn about",
-        "The best way to travel is",
-    ][:N_SAMPLES_EVAL] if N_SAMPLES_EVAL < 5 else [
-        "The capital of India is",
-        "My favorite food is", 
-        "Today the weather is",
-        "I want to learn about",
-        "The best way to travel is",
-        "In the morning I usually",
-        "The most important thing is",
-        "When I was young I",
-        "Science tells us that",
-        "The future of technology is",
-    ]
+    if not texts_en or not texts_hi:
+        print("ERROR: Need training data for en and hi in Exp2.")
+        return
+    
+    # Evaluation prompts
+    #
+    # Earlier revisions hard‑coded 5–10 English prompts here, which made
+    # success rates in this experiment extremely noisy (each example changed
+    # the rate by 10–20%). To get statistically meaningful comparisons
+    # between steering methods we now use a substantially larger prompt
+    # set drawn from FLORES English sentences, capped by N_SAMPLES_EVAL.
+    #
+    # This keeps Exp2 as a lightweight but numerically sensible sanity
+    # check; the more exhaustive method/layer analysis is performed in Exp9.
+    num_prompts = min(N_SAMPLES_EVAL, len(prompts_all))
+    if num_prompts < 20:
+        print(
+            f"[exp2] Warning: only {num_prompts} prompts available; "
+            "consider increasing N_SAMPLES_EVAL for more stable estimates."
+        )
+    test_prompts = prompts_all[:num_prompts]
     
     # Evaluate a subset of layers for steering (early, mid, late)
     layers_to_test = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]

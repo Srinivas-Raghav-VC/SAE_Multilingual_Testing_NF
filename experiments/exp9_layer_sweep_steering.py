@@ -175,7 +175,7 @@ def run_layer_sweep():
                 for strength in STEERING_STRENGTHS:
                     outputs = []
                     for p in tqdm(
-                        prompts[:50],
+                        prompts[:100],
                         desc=f"{target}-L{layer}-{method}@{strength}",
                         leave=False,
                     ):
@@ -235,11 +235,23 @@ def run_layer_sweep():
     # Calibrated judge summary per language (reusing Exp11 statistics)
     # ------------------------------------------------------------------
     cal_table = load_judge_calibration_table()
+    if not cal_table:
+        print(
+            "[exp9] Warning: no judge calibration statistics found. "
+            "Structural metrics remain valid, but calibrated judge summaries "
+            "will be omitted. Run Exp11 first to enable calibrated judge stats."
+        )
     judge_summary: Dict[str, Dict] = {}
     for lang, pool in judge_pools.items():
         cj = calibrated_judge_from_results(pool, lang=lang, calibration_table=cal_table)
         if cj is None:
             continue
+        print(
+            f"[exp9] Calibrated judge ({lang}): raw={cj.raw_accuracy:.3f}, "
+            f"corrected={cj.corrected_accuracy:.3f}, "
+            f"CI=({cj.confidence_interval[0]:.3f}, {cj.confidence_interval[1]:.3f}), "
+            f"n_test={cj.n_test}, n_calib_0={cj.n_calib_0}, n_calib_1={cj.n_calib_1}"
+        )
         judge_summary[lang] = {
             "raw_accuracy": cj.raw_accuracy,
             "corrected_accuracy": cj.corrected_accuracy,

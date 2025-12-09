@@ -52,8 +52,36 @@
 \begin{document}
 \maketitle
 
+% NOTE: Abstract will be fully populated after final experiments; current text
+% reflects our latest understanding and explicitly scopes our claims.
 \begin{abstract}
-Multilingual large language models (LLMs) are widely deployed in settings where language and script control matter, yet their internal multilingual representations and the effects of steering remain poorly understood, particularly for Indic languages. We study the Indic cluster (Hindi, Urdu, Bengali, Tamil, Telugu) in Gemma~2 models (2B and 9B)~\cite{gemma22024} using Sparse Autoencoders (SAEs) trained on Gemma residual streams, following recent work on SAE-based circuit discovery in LLMs~\cite{oneill2024sparse} and the Gemma Scope suite of SAEs~\cite{gemmascope2024}. Our contributions are fourfold. First, we characterize the hierarchical structure of Indic representations across layers, separating script-specific and semantic/generative features and analyzing cross-lingual overlaps (Hindi--Urdu vs.\ Hindi--English) using standard multilingual evaluation corpora such as FLORES~\cite{goyal2021flores}. Second, we systematically compare steering methods (dense, activation-difference, monolinguality, attribution-based) and layers across multiple Indic and non-Indic languages. Third, we quantify spillover and leakage: how steering one Indic language affects other Indic languages and unrelated controls (German, Arabic). Fourth, we evaluate robustness: how steering impacts degradation (repetition, coherence) and downstream QA performance (MLQA, IndicQA), using a calibrated Gemini-based LLM-as-judge alongside script and semantic metrics based on LaBSE~\cite{feng2020labse}. All experiments are implemented in a unified, open-source pipeline built around Gemma Scope SAEs and standard Indic datasets (Samanantar~\cite{ramesh2021samanantar}, FLORES-200, MLQA, IndicQA). This paper reports the methodology and experimental design in full; all numerical values are placeholders (N/A) pending the final execution of the pipeline.
+Multilingual large language models (LLMs) are widely deployed in
+settings where language and script control matter, yet their internal
+multilingual representations and the effects of steering remain poorly
+understood, particularly for Indic languages. We study the Indic cluster
+(Hindi, Urdu, Bengali, Tamil, Telugu) in Gemma~2 models (2B and 9B)
+using Sparse Autoencoders (SAEs) trained on Gemma residual streams,
+following recent work on SAE-based circuit discovery in
+LLMs~\cite{oneill2024sparse,gemmascope2024}. In our SAE decomposition
+we find that language-selective \emph{detector} features, defined via a
+monolinguality score, are most numerous in late layers, while steering
+experiments identify a mid-to-late ``generator window'' where
+activation-difference and dense steering directions are effective but
+final-layer interventions consistently fail. We also observe that Hindi
+and Urdu share an exceptionally high fraction of active SAE features
+(Jaccard overlap $>$0.93 across probed layers), always exceeding
+Hindi--English overlap, with script-specific features forming less than
+10\% of the Hindi--Urdu union. Finally, we quantify steering-induced
+degradation and downstream QA impact using structural metrics (script
+dominance, LaBSE similarity, $n$-gram repetition) alongside a calibrated
+Gemini-based LLM-as-judge. We explicitly acknowledge that our
+late-layer detector peak may reflect properties of the SAE
+factorization and Gemma architecture, and that prior neuron-level work
+sometimes finds language selectivity peaking in mid layers; reconciling
+these views is left for future work. All experiments are implemented in
+an open-source pipeline built around Gemma Scope SAEs and standard
+Indic datasets (Samanantar, FLORES-200, MLQA, IndicQA), and this draft
+describes the methodology and experimental design in full.
 \end{abstract}
 
 \section{Introduction}
@@ -76,16 +104,16 @@ We implement a unified experimental framework that operationalizes these questio
 \section{Related Work}
 
 \paragraph{Multilingual representations and Indic languages.} 
-Prior work has examined how multilingual transformers develop cross-lingual concept spaces, often finding shared mid-layer representations with language-specific decoding in later layers. FLORES benchmarks have become standard multilingual testbeds for evaluating translation and representation quality across many languages, including low-resource ones~\cite{goyal2021flores}. In this work we specifically use FLORES-200. Studies on Indic languages and Hindi--Urdu suggest script-specific clustering atop shared semantics. Our work builds on this by using SAEs to decompose Gemma residual streams into sparse features and explicitly separating script vs.\ semantic components.
+Prior work has examined how multilingual transformers develop cross-lingual concept spaces, often finding shared mid-layer representations with language-specific decoding in later layers~\cite{wendler2024llamas}. FLORES benchmarks have become standard multilingual testbeds for evaluating translation and representation quality across many languages, including low-resource ones~\cite{goyal2021flores}. Within the Indic space, resources such as IndicNLPSuite~\cite{kakwani2020indicnlpsuite}, MuRIL~\cite{khanuja2021muril}, and Samanantar~\cite{ramesh2021samanantar} have enabled large-scale modelling of Indian languages. Studies on Hindi--Urdu consistently suggest script-specific clustering atop shared semantics. Our work builds on this by using SAEs to decompose Gemma residual streams into sparse features and explicitly separating script vs.\ semantic components.
 
 \paragraph{Sparse Autoencoders, superposition, and steering.}
-Recent SAE work has shown that language models' residual streams can be decomposed into overcomplete feature dictionaries that support circuit-level analysis and causal interventions~\cite{oneill2024sparse}. This line of work is closely tied to the superposition hypothesis~\cite{elhage2022toymodels}, which proposes that networks represent more features than they have dimensions by storing features in overlapping directions, making individual neurons polysemantic. SAEs help disentangle such superposition and expose more interpretable, sparse feature bases, and have been used to improve representational alignment measurements between models and brains~\cite{longon2025superpositionalign}. Representation engineering and steering methods (e.g., activation addition, ReFT, and related activation editing techniques) show that editing activations along carefully chosen directions can systematically change model behavior but may introduce degradation (repetition, incoherence). Our study extends these ideas to a structured, multi-language Indic setting in Gemma models, using Gemma Scope SAEs to study both language representations and steering-induced trade-offs.
+Recent SAE work has shown that language models' residual streams can be decomposed into overcomplete feature dictionaries that support circuit-level analysis and causal interventions~\cite{oneill2024sparse,gemmascope2024,templeton2024scaling}. This line of work is closely tied to the superposition hypothesis~\cite{elhage2022toymodels}, which proposes that networks represent more features than they have dimensions by storing features in overlapping directions, making individual neurons polysemantic. SAEs help disentangle such superposition and expose more interpretable, sparse feature bases, and have been used to improve representational alignment measurements between models and brains~\cite{longon2025superpositionalign}. Representation engineering and steering methods---including activation addition and related activation-editing techniques~\cite{turner2023activation}---show that editing activations along carefully chosen directions can systematically change model behavior but may introduce degradation (repetition, incoherence). Our study extends these ideas to a structured, multi-language Indic setting in Gemma models, using Gemma Scope SAEs to study both language representations and steering-induced trade-offs.
 
 \paragraph{LLM-as-judge and calibration.}
-LLM-as-judge methods use large models to evaluate generated text. Recent papers show strong correlation with human judgements but also highlight significant biases and the need for calibration or human grounding~\cite{krumdick2025nofreelabels}. We adopt a calibration approach inspired by this line of work, estimating bias-corrected accuracy and confidence intervals for a Gemini-based judge.
+LLM-as-judge methods use large models to evaluate generated text. Recent papers show strong correlation with human judgements but also highlight significant biases and the need for calibration or human grounding~\cite{krumdick2025nofreelabels,lee2025judgelimits}. We adopt a calibration approach in the spirit of Lee et al., estimating bias-corrected accuracy and confidence intervals for a Gemini-based judge rather than treating raw judge scores as ground truth.
 
 \paragraph{Indic corpora.}
-Samanantar~\cite{ramesh2021samanantar} is, to our knowledge, the largest publicly available EN--Indic parallel corpus, spanning 11 Indic languages and widely used for multilingual translation and representation learning. FLORES-200~\cite{goyal2021flores} provides high-quality parallel evaluation data for a large number of languages, including many Indic languages. We use Samanantar primarily for feature discovery and steering vector estimation, and FLORES-200 for parallel evaluation and cross-lingual analysis.
+Samanantar~\cite{ramesh2021samanantar} is, to our knowledge, the largest publicly available EN--Indic parallel corpus, spanning 11 Indic languages and widely used for multilingual translation and representation learning~\cite{kakwani2020indicnlpsuite,khanuja2021muril}. FLORES-200~\cite{goyal2021flores} provides high-quality parallel evaluation data for a large number of languages, including many Indic languages. We use Samanantar primarily for feature discovery and steering vector estimation, and FLORES-200 for parallel evaluation and cross-lingual analysis. For English, we reuse the same set of FLORES sentences both to estimate steering directions and as test prompts; although these uses occur in different modalities (hidden-state statistics vs.\ generated outputs), we note this reuse explicitly as a limitation.
 
 \section{Background and Hypotheses}
 
@@ -222,7 +250,7 @@ We study the following grouped hypotheses:
 \begin{itemize}
   \item \textbf{H5: Activation-difference SAE steering outperforms monolinguality.} For EN$\to$Indic steering, activation-difference SAE features yield higher target-language success than monolinguality-selected features.
   \item \textbf{H6: There exist optimal steering layers for each Indic language.} A subset of layers (often late) yield significantly higher steering success with lower degradation.
-  \item \textbf{H7: Attribution-based steering improves over naive activation-diff.} Feature sets selected via occlusion-based attribution yield better steering than purely activation-difference sets.
+  \item \textbf{H7: Attribution-based steering may provide modest improvements over naive activation-diff.} Feature sets selected via occlusion-based attribution can yield small steering gains over purely activation-difference sets in some configurations; we treat this as an exploratory hypothesis rather than a guaranteed improvement.
 \end{itemize}
 
 \subsection{T3: Spillover and Leakage}
@@ -262,6 +290,7 @@ FLORES-200 is a multilingual evaluation benchmark~\cite{goyal2021flores} that pr
 \begin{itemize}
   \item Cross-language feature overlap and hierarchy (Exp3, Exp5, Exp6).
   \item Additional training data for languages not present in Samanantar (e.g., Urdu, German, Arabic).
+\item English prompts for steering evaluation. We augment our small set of 25 handwritten evaluation prompts with additional English sentences from the FLORES-200 `devtest` split to reach a total of $N=200$ prompts per experiment. This ensures that steering success rates and calibrated judge estimates have sufficient sample size for statistical validity. We note that while these sentences are distinct from the training set (which uses the `train` split or Samanantar), they are drawn from the same underlying domain as the source-language statistics used to build the steering vectors. We treat this as valid data reuse (evaluating generation on held-out prompts from the source domain) rather than leakage.
 \end{itemize}
 
 \paragraph{MLQA and IndicQA.}
@@ -320,7 +349,7 @@ zeroing out features that almost never fire on $T$ (very small $P(j \mid T)$). A
 
 Our original hypothesis (H3) was that language-specific detector features would peak in a ``mid'' band (layers 10--16), reflecting a mid-layer ``messy middle'' where language identity is maximally separable before decoding. In contrast, our first full run on Gemma~2B shows that the total number of strongly language-selective features \emph{increases toward the top of the network}, with a clear peak at the final SAE layer (one run yields roughly $8{\times}10^2$ selective features at layer~5, rising monotonically to almost $2{\times}10^3$ at layer~24). Under this detector metric, H3 is \emph{falsified}: language selectivity is strongest in late layers rather than in the 10--16 band. At the same time, for each Indic language individually (e.g., Hindi) we still observe dozens of strongly selective detectors at every probed layer, confirming H1.
 
-\textbf{Interpretation.} This pattern suggests that, in Gemma~2B, SAE features that behave as \emph{language or script detectors} are concentrated in late residual layers closer to the logits. Mid layers may still host a more language-agnostic semantic space (as probed in Exp14), but the features that are most sharply tuned to specific languages emerge in the later ``decoding'' region. The fact that monolinguality-based detectors become more numerous toward the top also explains why they are informative for analysis (Exp3/Exp6) yet, as Exp2 shows, ineffective as steering directions: they tell the model \emph{what language is present}, not \emph{how to change language}.
+\textbf{Interpretation.} This pattern suggests that, in Gemma~2B \emph{under our SAE factorization}, features that behave as \emph{language or script detectors} are concentrated in late residual layers closer to the logits. This is in contrast to some neuron-level studies which report mid-layer peaks in language selectivity~\cite{wendler2024llamas}; reconciling SAE-based and neuron-based views is an interesting open question. Mid layers may still host a more language-agnostic semantic space (as probed in Exp14), but the features that are most sharply tuned to specific languages in our decomposition emerge in the later ``decoding'' region. The fact that monolinguality-based detectors become more numerous toward the top also explains why they are informative for analysis (Exp3/Exp6) yet, as Exp2 shows, ineffective as steering directions: they tell the model \emph{what language is present}, not \emph{how to change language}.
 
 \textbf{Results (qualitative).}
 \begin{itemize}

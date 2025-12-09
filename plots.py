@@ -869,43 +869,203 @@ def plot_code_mix_robustness(results, output_dir):
     ax.set_title("Code-Mix and Noise Robustness (EN→HI, Exp16)")
     ax.axhline(0, color="black", linewidth=0.8)
 
+    
+
     output_path = output_dir / "fig13_code_mix_robustness.png"
+
     plt.savefig(output_path)
+
     plt.close()
+
     print(f"Saved: {output_path}")
 
 
-def generate_all_plots(results_dir):
-    """Generate all publication-quality plots."""
-    results_dir = Path(results_dir)
-    output_dir = results_dir / "figures"
-    output_dir.mkdir(exist_ok=True)
-    
-    print(f"Loading results from: {results_dir}")
-    results = load_results(results_dir)
-    
-    print(f"Found {len(results)} result files: {list(results.keys())}")
-    print(f"Saving figures to: {output_dir}")
-    print()
-    
-    # Generate each plot
-    plot_feature_counts_by_layer(results, output_dir)
-    plot_steering_comparison(results, output_dir)
-    plot_hindi_urdu_overlap(results, output_dir)
-    plot_script_semantics_controls(results, output_dir)
-    plot_monolinguality_distribution(results, output_dir)
-    plot_dead_features(results, output_dir)
-    plot_summary_table(results, output_dir)
-    plot_feature_labels_summary(results, output_dir)
-    plot_language_overlap_heatmaps(results, output_dir)
-    plot_steering_profile_similarity(results, output_dir)
-    plot_hierarchy_profile_similarity(results, output_dir)
-    plot_language_agnostic_alignment(results, output_dir)
-    plot_directional_symmetry(results, output_dir)
-    plot_code_mix_robustness(results, output_dir)
-    
-    print(f"\nAll figures saved to: {output_dir}")
 
+
+
+def plot_spillover_analysis(results, output_dir):
+
+    """Figure for Exp4: Spillover analysis (EN->HI vs EN->DE).
+
+    
+
+    Compares output language distribution when steering EN->HI vs EN->DE.
+
+    """
+
+    if not HAS_MATPLOTLIB:
+
+        return
+
+        
+
+    exp4 = results.get("exp4_spillover", {})
+
+    if not exp4:
+
+        print("No exp4_spillover results found")
+
+        return
+
+
+
+    # Extract data for a specific layer/strength (e.g., L20, S2.0)
+
+    # We look for layer "20" (or last available) and strength "2.0" (or max)
+
+    
+
+    def get_dist(condition_key):
+
+        layers = exp4.get(condition_key, {})
+
+        if not layers:
+
+            return None
+
+        # Prefer layer 20, else max layer
+
+        layer = "20" if "20" in layers else max(layers.keys(), key=int)
+
+        strengths = layers[layer]
+
+        # Prefer strength 2.0, else max strength
+
+        strength = "2.0" if "2.0" in strengths else max(strengths.keys(), key=float)
+
+        return strengths[strength].get("language_distribution", {})
+
+
+
+    dist_hi = get_dist("en_to_hi_layers")
+
+    dist_de = get_dist("en_to_de_layers")
+
+    
+
+    if not dist_hi or not dist_de:
+
+        print("Insufficient data for Exp4 plot")
+
+        return
+
+
+
+    # Languages to show
+
+    langs = ["hi", "ur", "bn", "en", "de"]
+
+    labels = ["Hindi", "Urdu", "Bengali", "English", "German"]
+
+    
+
+    vals_hi = [dist_hi.get(l, 0.0) for l in langs]
+
+    vals_de = [dist_de.get(l, 0.0) for l in langs]
+
+    
+
+    fig, ax = plt.subplots(figsize=FIGSIZE_SINGLE)
+
+    x = np.arange(len(langs))
+
+    width = 0.35
+
+    
+
+    ax.bar(x - width/2, vals_hi, width, label="Steer EN→HI", color="#e74c3c")
+
+    ax.bar(x + width/2, vals_de, width, label="Steer EN→DE (Control)", color="#95a5a6")
+
+    
+
+    ax.set_ylabel("Output %")
+
+    ax.set_title("Spillover: Target vs. Control Steering")
+
+    ax.set_xticks(x)
+
+    ax.set_xticklabels(labels)
+
+    ax.legend()
+
+    ax.grid(axis='y', alpha=0.3)
+
+    
+
+    output_path = output_dir / "fig_exp4_spillover.png"
+
+    plt.savefig(output_path)
+
+    plt.close()
+
+    print(f"Saved: {output_path}")
+
+
+
+
+
+def generate_all_plots(results_dir):
+
+    """Generate all publication-quality plots."""
+
+    results_dir = Path(results_dir)
+
+    output_dir = results_dir / "figures"
+
+    output_dir.mkdir(exist_ok=True)
+
+    
+
+    print(f"Loading results from: {results_dir}")
+
+    results = load_results(results_dir)
+
+    
+
+    print(f"Found {len(results)} result files: {list(results.keys())}")
+
+    print(f"Saving figures to: {output_dir}")
+
+    print()
+
+    
+
+    # Generate each plot
+
+    plot_feature_counts_by_layer(results, output_dir)
+
+    plot_steering_comparison(results, output_dir)
+
+    plot_hindi_urdu_overlap(results, output_dir)
+
+    plot_script_semantics_controls(results, output_dir)
+
+    plot_monolinguality_distribution(results, output_dir)
+
+    plot_dead_features(results, output_dir)
+
+    plot_summary_table(results, output_dir)
+
+    plot_feature_labels_summary(results, output_dir)
+
+    plot_language_overlap_heatmaps(results, output_dir)
+
+    plot_steering_profile_similarity(results, output_dir)
+
+    plot_hierarchy_profile_similarity(results, output_dir)
+
+    plot_language_agnostic_alignment(results, output_dir)
+
+    plot_directional_symmetry(results, output_dir)
+
+    plot_code_mix_robustness(results, output_dir)
+
+    plot_spillover_analysis(results, output_dir)
+
+    
+
+    print(f"\nAll figures saved to: {output_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description='Generate publication-quality plots')

@@ -106,7 +106,9 @@ def run_calibration_for_language(lang: str, layer: int = 20, strength: float = 2
         print("  Not enough outputs for calibration; skipping.")
         return None
     
-    # Split into calibration and test sets
+    # Split into calibration and test sets. We aim for reasonably sized
+    # sets (at least ~100 each) when data permits, to reduce variance in
+    # the Lee et al. calibration estimates.
     split_idx = len(outputs) // 2
     calibration_set = outputs[:split_idx]
     test_outputs = outputs[split_idx:]
@@ -146,6 +148,12 @@ def main():
         try:
             calib = run_calibration_for_language(lang, layer=layer, strength=strength)
             if calib is not None:
+                print(
+                    f"  [{lang}] raw={calib.raw_accuracy:.3f}, "
+                    f"corrected={calib.corrected_accuracy:.3f}, "
+                    f"CI=({calib.confidence_interval[0]:.3f}, {calib.confidence_interval[1]:.3f}), "
+                    f"n_test={calib.n_test}, n_calib_0={calib.n_calib_0}, n_calib_1={calib.n_calib_1}"
+                )
                 results[lang] = {
                     "raw_accuracy": calib.raw_accuracy,
                     "corrected_accuracy": calib.corrected_accuracy,

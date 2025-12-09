@@ -32,8 +32,8 @@ from dataclasses import dataclass
 import torch
 from tqdm import tqdm
 
-from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, STEERING_STRENGTHS, EVAL_PROMPTS
-from data import load_flores
+from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, N_SAMPLES_EVAL, STEERING_STRENGTHS, EVAL_PROMPTS
+from data import load_research_data
 from model import GemmaWithSAE
 from experiments.exp1_feature_discovery import compute_activation_rates, compute_monolinguality
 from evaluation_comprehensive import evaluate_steering_output, aggregate_results
@@ -176,17 +176,32 @@ def main():
     model = GemmaWithSAE()
     model.load_model()
 
-    # Load data
-    print("\nLoading FLORES data...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
-    texts_en = flores.get("en", [])
-    texts_hi = flores.get("hi", [])
+    # Load data using the unified research loader so that:
+    # - candidate selection uses training texts (train split),
+    # - probing prompts come from held-out steering prompts
+    #   (EVAL_PROMPTS + FLORES EN devtest).
+    print("\nLoading research data for Exp7 (causal probing)...")
+    data_split = load_research_data()
+    train_data = data_split.train
+    texts_en = train_data.get("en", [])
+    texts_hi = train_data.get("hi", [])
+    prompts_all = data_split.steering_prompts
 
     if not texts_en or not texts_hi:
-        print("ERROR: Need en and hi data.")
+        print("ERROR: Need training data for en and hi.")
         return
 
-    prompts = EVAL_PROMPTS[:10]
+    # Use a reasonably sized prompt set so that estimated causal effects
+    # are not dominated by noise. We draw prompts from the steering
+    # prompts (held-out FLORES EN + EVAL_PROMPTS), keeping them
+    # distinct from the training texts used for candidate selection.
+    num_prompts = min(max(N_SAMPLES_EVAL, 50), len(prompts_all))
+    prompts = prompts_all[:num_prompts]
+    if num_prompts < 20:
+        print(
+            f"[exp7] Warning: only {num_prompts} FLORES prompts available; "
+            "feature-level effect estimates may be noisy."
+        )
 
     # Use a small subset of layers for cost
     probe_layers = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]
@@ -237,4 +252,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

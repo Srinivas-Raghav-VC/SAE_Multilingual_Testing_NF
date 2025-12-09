@@ -29,7 +29,14 @@ from model import GemmaWithSAE
 
 
 def compute_activation_rates(model, texts, layer):
-    """Compute per-feature activation rates across texts."""
+    """Compute per-feature activation rates across texts.
+
+    We treat a feature as "active" when its SAE activation is > 0 and
+    estimate P(active) as the fraction of tokens for which this holds.
+    To reduce the influence of extremely weak, noisy activations, we
+    also implicitly discard features whose target-language activation
+    rate is below a small floor in `compute_monolinguality`.
+    """
     sae = model.load_sae(layer)
     n_features = sae.cfg.d_sae
     
@@ -55,11 +62,15 @@ def compute_monolinguality(rates_by_lang, target_lang):
     other_rates = [rates_by_lang[l] for l in rates_by_lang if l != target_lang]
     p_others_max = torch.stack(other_rates).max(dim=0).values
     
-    # Avoid division by zero
-    mono = p_target / (p_others_max + 1e-10)
+    # Avoid division by zero and suppress extremely rare features. We
+    # floor the denominator and then explicitly zero out features whose
+    # target-language activation rate is tiny so that numerical noise
+    # does not produce spuriously high monolinguality.
+    eps = 1e-10
+    mono = p_target / (p_others_max + eps)
     
-    # Zero out features that don't activate for target language
-    mono[p_target < 1e-4] = 0
+    rare_mask = p_target < 1e-4
+    mono[rare_mask] = 0
     
     return mono
 

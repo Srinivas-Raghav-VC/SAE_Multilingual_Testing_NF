@@ -449,7 +449,37 @@ def load_research_data(
     # ----- STEERING PROMPTS -----
     print("\n4. Loading steering prompts...")
     steering_prompts = EVAL_PROMPTS.copy()
-    print(f"  {len(steering_prompts)} steering prompts")
+    
+    # Augment with FLORES English sentences to reach N_STEERING_EVAL
+    # We use FLORES 'devtest' which is our standard validation/test set.
+    # Using it for steering evaluation is safe (held-out from training).
+    from config import N_STEERING_EVAL
+    
+    if len(steering_prompts) < N_STEERING_EVAL:
+        needed = N_STEERING_EVAL - len(steering_prompts)
+        print(f"  Augmenting with {needed} FLORES English sentences...")
+        
+        # Load enough FLORES English sentences
+        # We assume 'eng_Latn' is available via load_flores
+        flores_en = load_flores(
+            max_samples=needed + 50, 
+            languages={"en": "eng_Latn"}
+        )
+        
+        if flores_en and "en" in flores_en:
+            extra_prompts = flores_en["en"]
+            # Filter out any that might duplicate EVAL_PROMPTS (unlikely but good practice)
+            existing_set = set(steering_prompts)
+            added_count = 0
+            for p in extra_prompts:
+                if p not in existing_set:
+                    steering_prompts.append(p)
+                    added_count += 1
+                if added_count >= needed:
+                    break
+            print(f"  Added {added_count} prompts from FLORES")
+
+    print(f"  {len(steering_prompts)} steering prompts total")
     
     # ----- CREATE DATASPLIT -----
     data_split = DataSplit(

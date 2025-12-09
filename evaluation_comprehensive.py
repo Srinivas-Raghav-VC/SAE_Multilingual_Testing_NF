@@ -42,6 +42,7 @@ from config import (
 ###############################################################################
 
 _SEMANTIC_MODEL_CACHE: Dict[str, Any] = {}
+_TRUNCATION_WARNED: bool = False
 
 
 def get_semantic_model(model_name: str = SEMANTIC_MODEL_NAME):
@@ -61,6 +62,24 @@ def get_semantic_model(model_name: str = SEMANTIC_MODEL_NAME):
         return None
 
 
+def _truncate_for_semantic_model(text: str, max_tokens: int = 512) -> str:
+    """Best-effort truncation helper for LaBSE / sentence-transformers.
+
+    The underlying LaBSE encoder typically has a 512-token limit; we
+    explicitly truncate longer texts to avoid silent truncation inside
+    the model. We approximate tokens with whitespace-separated words.
+    """
+    global _TRUNCATION_WARNED
+    tokens = text.split()
+    if len(tokens) <= max_tokens:
+        return text
+    # Warn once per process to avoid log spam.
+    if not _TRUNCATION_WARNED:
+        print(f"[eval] Warning: truncating text from {len(tokens)} to {max_tokens} tokens for semantic similarity.")
+        _TRUNCATION_WARNED = True
+    return " ".join(tokens[:max_tokens])
+
+
 def semantic_similarity(text_a: str, text_b: str, model_name: str = SEMANTIC_MODEL_NAME) -> float:
     """Compute cosine similarity between two texts using LaBSE.
     
@@ -69,7 +88,9 @@ def semantic_similarity(text_a: str, text_b: str, model_name: str = SEMANTIC_MOD
     model = get_semantic_model(model_name)
     if model is None:
         return -1.0
-    
+
+    text_a = _truncate_for_semantic_model(text_a)
+    text_b = _truncate_for_semantic_model(text_b)
     embs = model.encode([text_a, text_b], convert_to_numpy=True, normalize_embeddings=True)
     return float(np.dot(embs[0], embs[1]))
 
@@ -147,6 +168,9 @@ class AggregateResults:
     avg_repetition_3gram: float
     avg_repetition_5gram: float
     degradation_rate: float
+    # Number of outputs where script detection found no alphabetic
+    # characters (possible degenerate generations).
+    n_empty_outputs: int = 0
     
     # LLM judge (if calibrated)
     calibrated_result: Optional[CalibratedJudgeResult] = None
@@ -835,7 +859,8 @@ def aggregate_results(
         return AggregateResults(
             n_samples=0, success_rate=0.0, semantic_success_rate=None,
             avg_target_script_ratio=0.0, avg_semantic_similarity=None,
-            avg_repetition_3gram=0.0, avg_repetition_5gram=0.0, degradation_rate=0.0
+            avg_repetition_3gram=0.0, avg_repetition_5gram=0.0,
+            degradation_rate=0.0, n_empty_outputs=0
         )
     
     n = len(results)
@@ -843,7 +868,8 @@ def aggregate_results(
     # Script success
     script_success = sum(1 for r in results if r.is_target_script) / n
     
-    # Target script ratio
+    # Target script ratio and empty-output tracking (no alphabetic chars)
+    n_empty_outputs = sum(1 for r in results if not r.script_ratios)
     target_ratios = [r.script_ratios.get(target_script, 0.0) for r in results]
     
     # Semantic
@@ -868,6 +894,7 @@ def aggregate_results(
         avg_repetition_3gram=np.mean([r.repetition_3gram for r in results]),
         avg_repetition_5gram=np.mean([r.repetition_5gram for r in results]),
         degradation_rate=deg_rate,
+        n_empty_outputs=n_empty_outputs,
     )
 
 

@@ -46,6 +46,11 @@ def compute_correct_jaccard(set_a: Set[int], set_b: Set[int]) -> OverlapResult:
     union = set_a | set_b
     
     if len(union) == 0:
+        # This should not normally happen if active-feature thresholds and
+        # data loading are sane. We treat it as zero overlap but log a
+        # diagnostic warning so that potential data issues do not go
+        # unnoticed.
+        print("[exp3] Warning: empty union encountered when computing Jaccard; returning 0.0")
         jaccard = 0.0
     else:
         jaccard = len(intersection) / len(union)
@@ -60,7 +65,14 @@ def compute_correct_jaccard(set_a: Set[int], set_b: Set[int]) -> OverlapResult:
 
 
 def get_active_features(model, texts, layer, threshold=0.01) -> Set[int]:
-    """Get set of features that activate frequently for texts."""
+    """Get set of features that activate frequently for texts.
+
+    This uses the same activation-rate definition as Exp1
+    (compute_activation_rates): for each feature we count the number of
+    tokens on which it is active (activation > 0) and divide by the
+    total number of tokens. A feature is considered "active" if this
+    rate exceeds `threshold`.
+    """
     sae = model.load_sae(layer)
     n_features = sae.cfg.d_sae
     

@@ -179,6 +179,13 @@ def run_qa_eval_for_lang(
 
     # Calibrated judge summaries (if calibration stats exist for this lang).
     cal_table = load_judge_calibration_table()
+    if not cal_table:
+        print(
+            "[exp12] Warning: no judge calibration statistics found. "
+            "QA results will report only structural metrics; calibrated "
+            "judge accuracies will be unavailable. Run Exp11 first to "
+            "enable calibrated judge summaries."
+        )
     judge_base = calibrated_judge_from_results(
         results_baseline, lang=target_lang, calibration_table=cal_table
     )
