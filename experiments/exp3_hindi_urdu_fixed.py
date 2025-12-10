@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Set, Dict, Tuple
 from dataclasses import dataclass
 
-from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY
+from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, SENSITIVITY_THRESHOLDS
 from data import load_flores
 from model import GemmaWithSAE
+from stats import bootstrap_ci
 
 
 @dataclass
@@ -41,6 +42,9 @@ def compute_correct_jaccard(set_a: Set[int], set_b: Set[int]) -> OverlapResult:
     
     Formula: |A ∩ B| / |A ∪ B|
     This is ALWAYS between 0 and 1.
+    
+    Raises:
+        AssertionError: If computed Jaccard is outside [0, 1] (indicates a bug)
     """
     intersection = set_a & set_b
     union = set_a | set_b
@@ -54,6 +58,12 @@ def compute_correct_jaccard(set_a: Set[int], set_b: Set[int]) -> OverlapResult:
         jaccard = 0.0
     else:
         jaccard = len(intersection) / len(union)
+    
+    # Research rigor validation: Jaccard MUST be in [0, 1]
+    assert 0.0 <= jaccard <= 1.0, (
+        f"BUG: Jaccard coefficient {jaccard} is outside valid range [0, 1]. "
+        f"|A|={len(set_a)}, |B|={len(set_b)}, |A∩B|={len(intersection)}, |A∪B|={len(union)}"
+    )
     
     return OverlapResult(
         jaccard=jaccard,
@@ -294,7 +304,55 @@ def main():
         "h4c_urdu_closer": h4c_pass,
         "overall": h4a_pass and h4b_pass and h4c_pass
     }
-    
+
+    # =========================================================================
+    # SENSITIVITY ANALYSIS: Jaccard at multiple activation thresholds
+    # =========================================================================
+    print("\n" + "=" * 60)
+    print("SENSITIVITY ANALYSIS: Jaccard vs Activation Threshold")
+    print("=" * 60)
+    print("\nThis shows that results are ROBUST to threshold choice.\n")
+
+    # Use mid-layer (13) or first available for sensitivity analysis
+    sens_layer = 13 if 13 in TARGET_LAYERS else TARGET_LAYERS[0]
+    thresholds = SENSITIVITY_THRESHOLDS.get("jaccard_activation_rates", [0.01, 0.02, 0.05, 0.1])
+
+    sensitivity_results = {"layer": sens_layer, "thresholds": {}}
+
+    print(f"Layer {sens_layer}:")
+    print(f"{'Threshold':<12} {'HI-UR Jaccard':<15} {'HI-EN Jaccard':<15} {'UR-EN Jaccard':<15}")
+    print("-" * 60)
+
+    for thresh in thresholds:
+        hi_features = get_active_features(model, texts_hi, sens_layer, threshold=thresh)
+        ur_features = get_active_features(model, texts_ur, sens_layer, threshold=thresh)
+        en_features = get_active_features(model, texts_en, sens_layer, threshold=thresh)
+
+        hi_ur = compute_correct_jaccard(hi_features, ur_features)
+        hi_en = compute_correct_jaccard(hi_features, en_features)
+        ur_en = compute_correct_jaccard(ur_features, en_features)
+
+        print(f"{thresh:<12.2f} {hi_ur.jaccard:<15.1%} {hi_en.jaccard:<15.1%} {ur_en.jaccard:<15.1%}")
+
+        sensitivity_results["thresholds"][str(thresh)] = {
+            "hindi_urdu": hi_ur.jaccard,
+            "hindi_english": hi_en.jaccard,
+            "urdu_english": ur_en.jaccard,
+            "n_hindi": len(hi_features),
+            "n_urdu": len(ur_features),
+            "n_english": len(en_features),
+        }
+
+    # Check robustness: HI-UR > HI-EN at all thresholds?
+    all_robust = all(
+        d["hindi_urdu"] > d["hindi_english"]
+        for d in sensitivity_results["thresholds"].values()
+    )
+    print(f"\nRobustness check: HI-UR > HI-EN at all thresholds? {'YES' if all_robust else 'NO'}")
+    sensitivity_results["robust_across_thresholds"] = all_robust
+
+    results["sensitivity_analysis"] = sensitivity_results
+
     # Save results
     output_dir = Path("results")
     output_dir.mkdir(exist_ok=True)

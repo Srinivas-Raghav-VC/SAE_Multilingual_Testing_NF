@@ -32,6 +32,7 @@ from config import (
     STEERING_STRENGTHS,
     NUM_FEATURES,
     N_SAMPLES_DISCOVERY,
+    LANG_TO_SCRIPT,
 )
 from data import load_research_data
 from model import GemmaWithSAE
@@ -123,16 +124,8 @@ def run_layer_sweep():
     targets = ["hi", "bn", "ta", "te", "ur", "de", "ar"]
     methods = ["dense", "activation_diff", "monolinguality", "random"]
 
-    # Map language code to target script name used in evaluation_comprehensive.SCRIPT_RANGES
-    lang_to_script = {
-        "hi": "devanagari",
-        "ur": "arabic",
-        "bn": "bengali",
-        "ta": "tamil",
-        "te": "telugu",
-        "de": "latin",
-        "ar": "arabic",
-    }
+    # Use centralized LANG_TO_SCRIPT mapping from config for consistency
+    lang_to_script = LANG_TO_SCRIPT
 
     # Load model (2B base with residual SAEs)
     model = GemmaWithSAE()

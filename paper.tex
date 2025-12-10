@@ -12,6 +12,9 @@
 \usepackage{caption}
 \usepackage{subcaption}
 \usepackage{microtype}
+\usepackage{empheq}
+\usepackage{algorithm}
+\usepackage{algorithmic}
 
 % Fonts: Times-like with decent math; Crimson optional if available
 \usepackage{times}
@@ -122,9 +125,9 @@ We consider a transformer LLM with $L$ layers and hidden dimension $d$, augmente
 \subsection{Formalization}
 
 Let $\mathcal{L}$ denote the set of languages we study (EN, HI, UR, BN, TA, TE, DE, AR). For an input token sequence $x_{1:T}$ and a transformer layer index $\ell \in \{0,\dots,L\}$, we write
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   h_{\ell,t}(x_{1:T}) \in \mathbb{R}^d
-\end{equation}
+\end{empheq}
 for the residual stream activation at position $t$ and layer $\ell$, and collect all positions into $H_\ell(x) \in \mathbb{R}^{T \times d}$.
 
 For each layer $\ell$ we attach a sparse autoencoder $(f_\ell, g_\ell)$ with feature dimension $m \gg d$:
@@ -139,11 +142,11 @@ For a fixed layer $\ell$ and feature index $j$, we define a binary activation in
   a_{\ell,j}(x,t) \;=\; \mathbb{I}\bigl[z_{\ell,t,j} > 0\bigr],
 \end{equation}
 where $\mathbb{I}[\cdot]$ is the indicator function. For a language $L \in \mathcal{L}$ with a corpus $\mathcal{D}_L$ of sentences, we estimate the \emph{activation rate} of feature $(\ell,j)$ given $L$ as
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   \hat{P}_\ell(j \mid L) \;=\;
   \frac{\displaystyle \sum_{x \in \mathcal{D}_L} \sum_{t=1}^{|x|} a_{\ell,j}(x,t)}
        {\displaystyle \sum_{x \in \mathcal{D}_L} |x|},
-\end{equation}
+\end{empheq}
 which is simply the fraction of tokens for which feature $j$ is active on layer $\ell$ for language $L$. In practice, $\mathcal{D}_L$ is drawn from Samanantar (for Indic languages with EN parallels) or FLORES-200 (for languages not covered by Samanantar).
 
 Given these activation rates, we define a \emph{language-selectivity score} (``monolinguality'') for feature $(\ell,j)$ and target language $T \in \mathcal{L}$ as
@@ -158,37 +161,37 @@ Given these activation rates, we define a \emph{language-selectivity score} (``m
 with a small floor $\epsilon$ (e.g., $10^{-4}$) to avoid assigning large scores to features that almost never fire on $T$. We call a feature \emph{strongly $T$-selective} if $M_{\ell,j}(T) > 3$, i.e., it is at least three times more active on $T$ than on any other language in $\mathcal{L}$. Exp1 counts such features per layer and language.
 
 For cross-language feature overlap (Exp3, Exp5, Exp6), we work with sets of active features. For a given layer $\ell$ and language $L$, we define the set
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   \mathcal{F}_\ell(L) \;=\; \bigl\{ j \in \{1,\dots,m\} : \hat{P}_\ell(j \mid L) > \tau \bigr\},
-\end{equation}
+\end{empheq}
 where $\tau$ is an activation-rate threshold (e.g., $0.01$). For two languages $L_1, L_2$ we then compute the \emph{Jaccard overlap}
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   J_\ell(L_1, L_2) \;=\;
   \frac{\bigl|\mathcal{F}_\ell(L_1) \cap \mathcal{F}_\ell(L_2)\bigr|}
        {\bigl|\mathcal{F}_\ell(L_1) \cup \mathcal{F}_\ell(L_2)\bigr|},
   \label{eq:jaccard}
-\end{equation}
+\end{empheq}
 which is guaranteed to lie in $[0,1]$ by construction and captures how similar the active feature sets are for $L_1$ and $L_2$ at layer $\ell$.
 
 Steering experiments (Exp2, Exp4, Exp7, Exp8, Exp9, Exp10, Exp15, Exp16) intervene on hidden states at layer $\ell$ by adding a \emph{steering vector} $v_\ell \in \mathbb{R}^d$. For a given residual stream state $h_{\ell,t}$ and scalar strength $\alpha \in \mathbb{R}$, the steered hidden state is
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   \tilde{h}_{\ell,t} \;=\; h_{\ell,t} + \alpha v_\ell.
   \label{eq:steering}
-\end{equation}
+\end{empheq}
 In the \emph{dense} case, $v_\ell$ is constructed as a difference between mean hidden states for a target language $T$ and a source language $S$:
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   v_\ell^{\mathrm{dense}}(T \leftarrow S) \;=\;
   \mathbb{E}_{x \in \mathcal{D}_T}\bigl[\bar{h}_\ell(x)\bigr]
   \;-\;
   \mathbb{E}_{x \in \mathcal{D}_S}\bigl[\bar{h}_\ell(x)\bigr],
-\end{equation}
+\end{empheq}
 where $\bar{h}_\ell(x)$ denotes the mean of $H_\ell(x)$ over tokens. In the SAE-based case, we instead select a set of features $S_\ell \subseteq \{1,\dots,m\}$ (e.g., by activation difference or monolinguality) and form
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   v_\ell^{\mathrm{SAE}} \;=\;
   \frac{1}{|S_\ell|}
   \sum_{j \in S_\ell} W^{(\ell)}_{\mathrm{dec}}[j,:],
   \label{eq:sae-steering}
-\end{equation}
+\end{empheq}
 which averages the decoder directions of selected features. Occlusion-based attribution (Exp10, Exp13) instead uses the SAE to \emph{ablate} individual or grouped features by encoding $h_{\ell,t}$, zeroing selected coordinates in $z_{\ell,t}$, and decoding back to a modified $\hat{h}_{\ell,t}$.
 
 We will use the terms \emph{detector} and \emph{generator} feature in a precise, operational sense.
@@ -203,26 +206,26 @@ These quantities are purely \emph{correlational}: they say when a feature is \em
 
 \paragraph{Generator features.}
 By contrast, a feature behaves as a generator for language $T$ if \emph{increasing its activation causally pushes the model toward generating $T$}. We formalize this via single-feature steering and occlusion. For a feature $(\ell,j)$ with decoder direction $w_{\ell,j}$, consider the intervention
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   h_{\ell,t}^{(+)} \;=\; h_{\ell,t} + \alpha w_{\ell,j}, \qquad
   h_{\ell,t}^{(-)} \;=\; h_{\ell,t} - \alpha w_{\ell,j},
   \label{eq:single-feature-steer}
-\end{equation}
+\end{empheq}
 for a small $\alpha > 0$, applied during generation. Let $y^{(+)}$ and $y^{(-)}$ be the corresponding completions for a prompt $x$, and let $S_T(y)$ denote a scalar \emph{language score} for $T$ (e.g., the fraction of alphabetic characters in the target script, or an indicator that the output passes our script-dominance test). We define a \emph{generator score} for $(\ell,j)$ with respect to $T$ as
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   G_{\ell,j}(T) \;=\;
   \mathbb{E}_{x \sim \mathcal{P}}\bigl[ S_T\bigl(y^{(+)}(x)\bigr) - S_T\bigl(y^{(-)}(x)\bigr) \bigr],
   \label{eq:generator-score}
-\end{equation}
+\end{empheq}
 where the expectation is over a prompt distribution $\mathcal{P}$ (e.g., FLORES prompts). In words, $G_{\ell,j}(T)$ measures how much nudging feature $j$ up versus down changes the tendency of the model to produce language $T$. In practice (Exp7), we approximate \eqref{eq:generator-score} using a finite set of prompts and script-based success indicators.
 
 Occlusion-based attribution in Exp10 provides a complementary, ablation-style generator score. For feature $(\ell,j)$ we define
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   A_{\ell,j}(T) \;=\;
   \mathbb{E}_{x \sim \mathcal{P}}
   \bigl[ S_T(y(x)) - S_T(\tilde{y}_{-j}(x)) \bigr],
   \label{eq:attribution-score}
-\end{equation}
+\end{empheq}
 where $y(x)$ is the baseline completion and $\tilde{y}_{-j}(x)$ is the completion when we encode $h_{\ell,t}$ through the SAE, set $z_{\ell,t,j}\!=\!0$ for all $t$, and decode back before continuing the forward pass. A large positive $A_{\ell,j}(T)$ means that \emph{removing} feature $j$ reduces the model's ability to generate $T$; such features are strong candidates for inclusion in attribution-based steering sets $S_\ell^{\mathrm{attr}}(T,k)$.
 
 In this paper we use:
@@ -280,6 +283,17 @@ We primarily use Gemma 2B and optionally Gemma 2 9B~\cite{gemma22024}:
 
 SAEs are loaded from Gemma Scope releases and attached to residual streams at selected layers (e.g., 5, 8, 10, 13, 16, 20, 24). For each layer, the SAE has width $m = 16384$ features (width 16k), similar in spirit to SAE configurations used in prior circuit-identification work~\cite{oneill2024sparse}.
 
+\begin{figure}[t]
+  \centering
+  % Save this architecture diagram as figures/architecture_multilingual_sae.(pdf|png|jpg)
+  \includegraphics[width=\linewidth]{figures/architecture_multilingual_sae}
+  \caption{Gemma-2 with Gemma Scope sparse autoencoders attached to residual stream layers (conceptual). 
+  Left: example inputs in multiple languages and scripts (EN, HI, UR, BN, TA, TE, DE, AR). 
+  Middle: the Gemma-2 2B/9B transformer with SAEs attached at selected layers of the residual stream. 
+  Right: each SAE encodes residual activations into 16k sparse features and decodes back, yielding interpretable language, script, syntax, and semantic features from which we construct steering vectors in SAE space.}
+  \label{fig:architecture-multilingual}
+\end{figure}
+
 \subsection{Datasets}
 
 \paragraph{Samanantar.}
@@ -320,6 +334,52 @@ We compute 3-gram and 5-gram repetition ratios and classify outputs as degraded 
 \paragraph{LLM-as-judge (Gemini).}
 We use a Gemini model as a judge with a structured rubric (language, faithfulness, coherence). Raw scores are then calibrated using a bias-correction framework inspired by recent work on limitations of LLM-as-a-judge~\cite{krumdick2025nofreelabels}, estimating sensitivity, specificity, and bias-adjusted accuracy with confidence intervals.
 
+\begin{algorithm}[t]
+  \caption{Constructing an SAE-based steering vector at layer $\ell$}
+  \label{alg:steering}
+  \begin{algorithmic}[1]
+    \REQUIRE Training texts in source language $S$ and target language $T$; SAE at layer $\ell$ with decoder $W_{\text{dec}}$; method $\in$ \{dense, activation-diff, monolinguality, attribution\}; number of features $k$ (for SAE methods).
+    \STATE Encode all $S$ and $T$ texts through Gemma to obtain residual activations $h_{\ell,t}$.
+    \IF{method = dense}
+      \STATE Compute mean activations $\bar{h}_\ell(S)$ and $\bar{h}_\ell(T)$.
+      \STATE Set $v_\ell \leftarrow \bar{h}_\ell(T) - \bar{h}_\ell(S)$.
+    \ELSE
+      \STATE Encode $h_{\ell,t}$ through the SAE encoder to obtain sparse features $z_{\ell,t}$.
+      \STATE Estimate activation statistics per feature and language (rates or attribution scores).
+      \STATE Select a feature set $S_\ell$ of size $k$ according to the chosen method:
+        \STATE \hspace{1.0em}activation-diff: top-$k$ by $\hat{P}(j\mid T) - \hat{P}(j\mid S)$;
+        \STATE \hspace{1.0em}monolinguality: top-$k$ by $M_j(T)$;
+        \STATE \hspace{1.0em}attribution: top-$k$ by occlusion score $A_{\ell,j}(T)$.
+      \STATE Set $v_\ell \leftarrow \frac{1}{k} \sum_{j\in S_\ell} W_{\text{dec}}[:,j]$.
+    \ENDIF
+    \STATE Normalize $v_\ell$ (e.g., to unit norm) and use it in the forward hook: $h_{\ell,t} \leftarrow h_{\ell,t} + \alpha v_\ell$ during generation.
+    \RETURN Steering vector $v_\ell$.
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+  \caption{Calibrating an LLM-as-judge for steering evaluation}
+  \label{alg:calibration}
+  \begin{algorithmic}[1]
+    \REQUIRE Calibration set of $(\text{prompt}, \text{output})$ pairs with structural ground-truth label $y\in\{0,1\}$ (success/failure); judge predictions $\hat{y}$; desired confidence level.
+    \STATE Partition calibration examples into truly-correct ($y=1$) and truly-incorrect ($y=0$).
+    \STATE Estimate sensitivity $q_1 \leftarrow P(\hat{y}=1 \mid y=1)$ and specificity $q_0 \leftarrow P(\hat{y}=0 \mid y=0)$ using binomial proportions.
+    \STATE For a new evaluation set, compute raw judge-positives rate $p \leftarrow P(\hat{y}=1)$.
+    \STATE Compute bias-corrected accuracy $\hat{\theta} \leftarrow (p + q_0 - 1)/(q_0 + q_1 - 1)$ following Lee-style estimators.
+    \STATE Construct confidence intervals for $q_0$, $q_1$, and $\hat{\theta}$ using Agresti--Coull or bootstrap methods.
+    \RETURN Calibrated judge parameters $(q_0, q_1, \hat{\theta}, \text{CIs})$.
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{figure}[t]
+  \centering
+  % Conceptual steering + judge + QA pipeline diagram.
+  % Save the final artwork as figures/steering_eval_pipeline.(pdf|png).
+  \includegraphics[width=\linewidth]{figures/steering_eval_pipeline}
+  \caption{Steering, evaluation, and calibrated judge pipeline (conceptual). Steering vectors (dense, SAE activation-difference, monolinguality, attribution) are applied at a chosen layer in Gemma-2. We compare baseline vs.\ steered generations using structural metrics (script ratios, LaBSE similarity, repetition/degradation) and a Gemini-based LLM judge with Lee-style calibration to obtain bias-corrected accuracy estimates, while also measuring QA performance on MLQA and IndicQA.}
+  \label{fig:steering-pipeline}
+\end{figure}
+
 \section{Experiments}
 
 In this draft, all numerical results are placeholders (N/A). The codebase provides a unified runner (\texttt{run.py}) and a summarizer (\texttt{summarize\_results.py}). Executing:
@@ -329,22 +389,37 @@ python summarize_results.py
 \end{verbatim}
 will generate JSON outputs, plots, and a text summary to populate the results below.
 
+\begin{figure*}[t]
+  \centering
+  % Save the overview comic as figures/overview_comic.(pdf|png|jpg)
+  \includegraphics[width=\textwidth]{figures/overview_comic}
+  \caption{How we steer Gemma's multilingual brain (conceptual). 
+  Panel~1: multilingual prompts in English and Indic languages. 
+  Panel~2: Gemma-2 with SAEs at multiple layers; the residual stream is decomposed into sparse features and a mid-layer shared concept space, while late layers host language-specific decoding lobes. 
+  Panel~3: changing the steering strength $\alpha$ moves generations from English outputs to Indic outputs. 
+  Panel~4: we evaluate script choice, semantic similarity (LaBSE), degradation, and QA performance, and calibrate a Gemini-based LLM judge.}
+  \label{fig:overview}
+\end{figure*}
+
+% Placeholder empirical plot from plots.py (will be regenerated and cleaned for the final draft).
 \begin{figure}[t]
   \centering
-  % Save the infographic image as, e.g., figures/indic_sae_infographic.(pdf|png|jpg)
-  \includegraphics[width=\textwidth]{figures/indic_sae_infographic}
-  \caption{High-level overview of our experimental setup. Left: Gemma 2B/9B transformer with Gemma Scope SAEs attached to residual streams at selected layers, processing inputs in multiple scripts (Latin, Devanagari, Arabic, Bengali, Tamil, Telugu) using Samanantar, FLORES-200, MLQA, and IndicQA. Middle: feature analysis via monolinguality-based detectors (Exp1), Hindi--Urdu overlap and script vs semantic splits (Exp3, Exp6), and cross-layer EN--HI alignment (Exp14). Right: steering and evaluation pipeline, including EN$\to$Indic steering with dense and SAE-based directions (Exp2, Exp7, Exp9, Exp10), spillover analysis (Exp4), scaling to 9B (Exp8), QA degradation (Exp12), and calibrated LLM-as-judge evaluation (Exp11), together with robustness metrics (script dominance, LaBSE semantics, repetition).}
-  \label{fig:overview}
+  % This file is produced by plots.py as part of the automatic summary.
+  \includegraphics[width=\linewidth]{results/figures/fig1_feature_counts_by_layer}
+  \caption{Placeholder empirical plot (auto-generated): number of strongly language-selective SAE features (monolinguality $M>3$) per layer in Gemma-2B. The final version of the paper will replace this placeholder with a cleaned version of the same plot generated from the latest experimental run.}
+  \label{fig:feature-counts-placeholder}
 \end{figure}
 
-\subsection{Exp1: Feature Discovery (Monolinguality Detectors)}
+\subsection{Geometry of Indic Representations (Exp1, Exp3, Exp5, Exp6)}
+
+\paragraph{Exp1: Feature Discovery (Monolinguality Detectors).}
 
 \textbf{Goal.} Identify language-selective detector features by computing monolinguality scores per SAE feature and language, and test whether such features peak in mid layers or late layers.
 
 \textbf{Method.} For each feature $j$ and language $L$, we estimate an activation rate $P(j \mid L)$ as the fraction of tokens on which $j$ is active in Samanantar/FLORES samples. For a target language $T$, we define a monolinguality score
-\begin{equation}
+\begin{empheq}[box=\fbox]{equation}
   M_j(T) \;=\; \frac{P(j \mid T)}{\max_{L \neq T} P(j \mid L)},
-\end{equation}
+\end{empheq}
 zeroing out features that almost never fire on $T$ (very small $P(j \mid T)$). A feature is counted as \emph{strongly $T$-selective} if $M_j(T) > 3$, i.e., it is at least three times more active on $T$ than on any other language in our set (EN, HI, UR, BN, TA, TE, DE, AR). We then count, for each layer, how many features are strongly selective for \emph{any} language under this definition.
 
 Our original hypothesis (H3) was that language-specific detector features would peak in a ``mid'' band (layers 10--16), reflecting a mid-layer ``messy middle'' where language identity is maximally separable before decoding. In contrast, our first full run on Gemma~2B shows that the total number of strongly language-selective features \emph{increases toward the top of the network}, with a clear peak at the final SAE layer (one run yields roughly $8{\times}10^2$ selective features at layer~5, rising monotonically to almost $2{\times}10^3$ at layer~24). Under this detector metric, H3 is \emph{falsified}: language selectivity is strongest in late layers rather than in the 10--16 band. At the same time, for each Indic language individually (e.g., Hindi) we still observe dozens of strongly selective detectors at every probed layer, confirming H1.
@@ -358,7 +433,7 @@ Our original hypothesis (H3) was that language-specific detector features would 
   \item Dead-feature counts (features that never activate) are substantial but do not qualitatively change this trend; they are highest for low-resource languages at early layers.
 \end{itemize}
 
-\subsection{Exp3: Hindi--Urdu Overlap (Correct Jaccard)}
+\paragraph{Exp3: Hindi--Urdu Overlap (Correct Jaccard).}
 
 \textbf{Goal.} Quantify overlap between Hindi and Urdu features and separate script vs.\ semantic features.
 
@@ -372,7 +447,7 @@ Our original hypothesis (H3) was that language-specific detector features would 
   \item Script-specific fractions are smallest in early and mid layers and become slightly larger in the very top SAE layer, consistent with the idea that later layers specialize for script and surface-form decoding.
 \end{itemize}
 
-\subsection{Exp5 \& Exp6: Hierarchical and Script vs Semantic Structure}
+\paragraph{Exp5 \& Exp6: Hierarchical and Script vs Semantic Structure.}
 
 \textbf{Goal.} Analyze shared vs Indic-only vs script/semantic features across layers, and cluster Indic vs non-Indic languages.
 
@@ -392,19 +467,26 @@ We summarize statistics over early (layers 5, 8), mid (10, 13, 16), and late (20
   \item \emph{Hierarchy summary.} Aggregating across layers, early layers are dominated by shared and script-agnostic features (orthography and tokenization), mid layers retain high cross-lingual overlap while introducing more family-specific structure, and late layers add a thicker shell of language- and script-specific detectors on top of the shared core.
 \end{itemize}
 
-\subsection{Exp2, Exp7, Exp9, Exp10: Steering Methods and Layers}
+\begin{figure*}[t]
+  \centering
+  % Save this conceptual diagram as figures/language_concept_space.(pdf|png|jpg)
+  \includegraphics[width=\textwidth]{figures/language_concept_space}
+  \caption{Language-agnostic concept space across depth (conceptual). 
+  This schematic is \emph{not} a substitute for empirical plots; it is a visual summary of the qualitative patterns observed in our experiments. 
+  Left: early layers are dominated by orthography and tokenization; languages cluster loosely by script, consistent with early-layer feature overlaps and script controls (Exp5, Exp6). 
+  Middle: mid layers form a shared semantic concept space where Indic and non-Indic languages overlap strongly; Hindi--Urdu form a tight cluster, reflecting their consistently higher Jaccard overlap compared to Hindi--English (Exp3) and cross-layer alignment (Exp14). 
+  Right: late layers specialize for language-specific decoding and script, adding a shell of language- and script-specific detectors on top of the shared core while preserving strong HI--UR similarity, in line with late-layer detector counts (Exp1) and script-specific fractions (Exp3, Exp6).}
+  \label{fig:concept-space}
+\end{figure*}
 
-\textbf{Goal.} Compare steering methods (dense, activation-diff SAE, monolinguality SAE, random, attribution-based) across layers and languages.
+\subsection{Steering Methods and Layers (Exp2, Exp7, Exp9, Exp10)}
 
-\textbf{Method.}
-\begin{itemize}
-  \item \textbf{Exp2:} Compare methods at selected layers (e.g., 5, 13, 20, 24) for EN$\to$HI steering.
-  \item \textbf{Exp7:} Probe individual SAE features by steering them up/down and measuring changes in script ratio, semantic similarity, and degradation.
-  \item \textbf{Exp9:} Full layer $\times$ method $\times$ language sweep (HI, BN, TA, TE, UR, DE, AR), evaluating multiple strengths and aggregating script, semantics, degradation, and LLM-judge scores.
-  \item \textbf{Exp10:} Use occlusion attribution to identify causally important features and build an attribution-based steering vector, comparing it to dense and activation-diff vectors.
-\end{itemize}
+\paragraph{Exp2: Steering method comparison at selected layers.}
+\textbf{Goal.} Compare dense, activation-diff SAE, monolinguality SAE, and random steering at a small set of layers (e.g., 5, 13, 20, 24) for EN$\to$HI steering.
 
-\textbf{Results (partial, Exp2).} In an initial EN$\to$HI steering run on FLORES prompts:
+\textbf{Method.} We construct steering vectors for each method using the procedure in Algorithm~\ref{alg:steering} and apply them at the chosen layers while generating from FLORES EN prompts.
+
+\textbf{Results (partial).} In an initial EN$\to$HI steering run on FLORES prompts:
 \begin{itemize}
   \item Dense and activation-difference SAE steering achieve very high Hindi script success (often $90$--$100\%$ of generations in Devanagari) at mid and late layers (e.g., 5, 13, 20) for suitable strengths.
   \item Monolinguality-selected feature sets and random feature baselines produce essentially $0\%$ language switching at all tested layers and strengths, consistent with their role as detectors and a negative control respectively.
@@ -412,56 +494,58 @@ We summarize statistics over early (layers 5, 8), mid (10, 13, 16), and late (20
 \end{itemize}
 Full cross-language sweeps (Exp9), attribution-based steering (Exp10), and single-feature causal probing (Exp7) are left as \textbf{N/A} until the corresponding experiments are fully re-run and summarized.
 
-\subsection{Exp4: Spillover Analysis}
+\paragraph{Exp7: Single-feature causal probing.}
+\textbf{Goal.} Estimate per-feature generator scores $G_{\ell,j}(T)$ and attribution scores $A_{\ell,j}(T)$ for selected SAEs.
 
-\textbf{Goal.} Measure spillover: how EN$\to$Hindi steering affects other Indic languages vs non-Indic controls.
+\textbf{Method.} For a set of candidate features at layers of interest, we perform single-feature steering per \eqref{eq:single-feature-steer} and occlusion per \eqref{eq:attribution-score}, measuring script-based success differences on a small prompt set.
 
-\textbf{Method.} Apply a Hindi steering vector and classify outputs by script/language, measuring probabilities of outputs in HI, UR, BN, TA, TE, DE, AR.
+\textbf{Results.} \textbf{N/A} (exploratory; experiment to be fully re-run).
 
-\textbf{Results (placeholder).}
-\begin{itemize}
-  \item Spillover rates to each language under Hindi steering: \textbf{N/A}.
-\end{itemize}
+\paragraph{Exp9: Full layer $\times$ method $\times$ language sweep.}
+\textbf{Goal.} Systematically evaluate steering success and degradation across layers, methods, and target languages.
 
-\subsection{Exp8: Scaling to 9B and Low-Resource Languages}
+\textbf{Method.} For each layer in $\{5,8,10,13,16,20,24\}$, each steering method (dense, activation-diff SAE, monolinguality SAE, random), and each target language (HI, BN, TA, TE, UR, DE, AR), we build a steering vector via Algorithm~\ref{alg:steering}, generate from multiple prompts at several strengths, and aggregate script, semantic, degradation, and LLM-judge metrics.
 
+\textbf{Results.} \textbf{N/A} (planned main sweep; will be populated from \texttt{exp9\_layer\_sweep\_steering.json} and plots).
+
+\paragraph{Exp10: Attribution-based steering.}
+\textbf{Goal.} Use occlusion attribution to select causally important features and construct attribution-based steering vectors.
+
+\textbf{Method.} We use occlusion scores $A_{\ell,j}(T)$ to choose top-$k$ features and build steering vectors via Algorithm~\ref{alg:steering}, then compare their performance to dense and activation-diff steering.
+
+\textbf{Results.} \textbf{N/A} (exploratory; will be populated from \texttt{exp10\_attribution\_occlusion.json}).
+
+\subsection{Spillover and Scaling (Exp4, Exp8)}
+
+\paragraph{Exp4: Spillover analysis.}
+\textbf{Goal.} Measure how EN$\to$Hindi steering affects other Indic languages vs non-Indic controls.
+
+\textbf{Method.} Apply a Hindi steering vector at selected layers and classify outputs by script/language, measuring probabilities of outputs in HI, UR, BN, TA, TE, DE, AR (and optionally EN$\to$DE as a control steering direction).
+
+\textbf{Results.} \textbf{N/A} (will be populated from \texttt{exp4\_spillover.json} and associated plots).
+
+\paragraph{Exp8: Scaling to 9B and low-resource languages.}
 \textbf{Goal.} Compare 2B vs 9B representations and simple EN$\to$HI steering, including low-resource Indic and non-Indic languages.
 
-\textbf{Method.} Compute active feature counts per language and layer, and evaluate dense vs SAE steering on a small set of prompts for EN$\to$HI.
+\textbf{Method.} Compute active feature counts per language and layer and evaluate dense vs SAE steering on a small set of prompts for EN$\to$HI, treating 9B as a sanity check rather than a full scaling study.
 
-\textbf{Results (placeholder).}
-\begin{itemize}
-  \item Feature coverage for 2B vs 9B per language and layer: \textbf{N/A}.
-  \item EN$\to$HI success and degradation for 2B vs 9B layers: \textbf{N/A}.
-\end{itemize}
+\textbf{Results.} \textbf{N/A} (sanity-check experiment; will be populated from \texttt{exp8\_scaling\_9b\_low\_resource.json}).
 
-\subsection{Exp11: Calibrated LLM-as-Judge}
+\subsection{Judge Calibration and QA Degradation (Exp11, Exp12)}
 
+\paragraph{Exp11: Calibrated LLM-as-judge.}
 \textbf{Goal.} Calibrate a Gemini-based judge for multilingual steering evaluation.
 
-\textbf{Method.} Use a calibration set with ground-truth labels; estimate sensitivity, specificity, and bias-corrected accuracy with CIs as in recent LLM-as-judge analyses~\cite{krumdick2025nofreelabels}.
+\textbf{Method.} Use a calibration set with structural ground-truth labels to estimate sensitivity, specificity, and bias-corrected accuracy with confidence intervals as in recent LLM-as-judge analyses~\cite{krumdick2025nofreelabels}.
 
-\textbf{Results (placeholder).}
-\begin{itemize}
-  \item Raw judge accuracy per language: \textbf{N/A}.
-  \item Bias-corrected accuracy and 95\% CI per language: \textbf{N/A}.
-\end{itemize}
+\textbf{Results.} \textbf{N/A} (to be filled from \texttt{exp11\_judge\_calibration.json} and calibration plots).
 
-\subsection{Exp12: QA Degradation Under Steering}
-
+\paragraph{Exp12: QA degradation under steering.}
 \textbf{Goal.} Quantify how EN$\to$target steering affects QA performance on MLQA and IndicQA.
 
-\textbf{Method.} For each target language (HI, DE, AR; HI, BN, TA, TE), we:
-\begin{itemize}
-  \item Use Exp9 results to pick best steering layer, strength, and method.
-  \item Generate baseline and steered answers for MLQA/IndicQA questions.
-  \item Evaluate script dominance, LaBSE similarity to gold answers, degradation, and LLM-judge scores.
-\end{itemize}
+\textbf{Method.} For each target language (HI, DE, AR; HI, BN, TA, TE), we use Exp9 results to pick a steering configuration, generate baseline and steered answers for MLQA/IndicQA questions, and evaluate script dominance, LaBSE similarity to gold answers, degradation, and LLM-judge scores.
 
-\textbf{Results (placeholder).}
-\begin{itemize}
-  \item MLQA/IndicQA baseline vs steered script success, semantic similarity, and degradation per language: \textbf{N/A}.
-\end{itemize}
+\textbf{Results.} \textbf{N/A} (to be filled from \texttt{exp12\_qa\_degradation.json} and QA metric plots).
 
 \section{Discussion}
 

@@ -38,6 +38,7 @@ from config import (
     TARGET_LAYERS,
     N_SAMPLES_DISCOVERY,
     N_SAMPLES_EVAL,
+    LANG_TO_SCRIPT,
 )
 from data import load_research_data
 from model import GemmaWithSAE
@@ -51,14 +52,8 @@ from evaluation_comprehensive import (
 )
 
 
-LANG_TO_SCRIPT = {
-    "hi": "devanagari",
-    "bn": "bengali",
-    "ta": "tamil",
-    "te": "telugu",
-    "de": "latin",
-    "ar": "arabic",
-}
+# Use centralized LANG_TO_SCRIPT from config.py for consistency
+# (imported above)
 
 
 def load_best_steering_from_exp9(
@@ -118,7 +113,10 @@ def run_qa_eval_for_lang(
     results_baseline = []
     results_steered = []
 
-    script = LANG_TO_SCRIPT.get(target_lang, "devanagari")
+    script = LANG_TO_SCRIPT.get(target_lang)
+    if script is None:
+        print(f"[exp12] WARNING: No script mapping for '{target_lang}', defaulting to 'devanagari'")
+        script = "devanagari"
 
     for ex in tqdm(
         qa_examples[:N_SAMPLES_EVAL],

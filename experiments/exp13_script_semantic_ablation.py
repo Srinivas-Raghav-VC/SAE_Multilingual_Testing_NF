@@ -268,7 +268,9 @@ def main():
     print(f"  #HI script-only features: {len(hi_script_only)}")
     print(f"  #HI semantic (script-robust) features: {len(hi_semantic)}")
 
-    prompts = EVAL_PROMPTS[:20]
+    # Use at least 50 prompts for statistically meaningful ablation comparisons
+    # (increased from 20 for research rigor)
+    prompts = EVAL_PROMPTS[:50] if len(EVAL_PROMPTS) >= 50 else EVAL_PROMPTS
 
     print("\nRunning group ablation for HI script-only features...")
     script_res = run_group_ablation(

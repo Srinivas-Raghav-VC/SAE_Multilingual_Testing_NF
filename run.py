@@ -19,7 +19,7 @@ from pathlib import Path
 
 
 def validate_setup():
-    """Validate all dependencies and configuration."""
+    """Validate all dependencies, configuration, and research rigor checks."""
     print("=" * 60)
     print("VALIDATING SETUP")
     print("=" * 60)
@@ -139,6 +139,24 @@ def validate_setup():
     else:
         print("   ⚠ HF_TOKEN not set (may need for gated models)")
         checks.append(True)  # Not fatal for public models
+    
+    # 8. Research rigor validation
+    print("\n8. Research rigor validation...")
+    try:
+        from validation import validate_experiment_setup
+        rigor_passed, rigor_warnings = validate_experiment_setup(verbose=False)
+        if rigor_passed:
+            print(f"   ✓ Research rigor checks passed ({len(rigor_warnings)} warnings)")
+            checks.append(True)
+        else:
+            errors = [w for w in rigor_warnings if w.severity == "error"]
+            print(f"   ✗ Research rigor checks failed: {len(errors)} critical errors")
+            for e in errors:
+                print(f"     - {e.message}")
+            checks.append(False)
+    except ImportError as e:
+        print(f"   ⚠ Could not run rigor validation: {e}")
+        checks.append(True)  # Not fatal, but should be fixed
     
     # Summary
     print("\n" + "=" * 60)

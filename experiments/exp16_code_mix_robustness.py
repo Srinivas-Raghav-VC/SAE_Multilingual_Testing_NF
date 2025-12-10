@@ -33,7 +33,7 @@ import random
 
 from tqdm import tqdm
 
-from config import TARGET_LAYERS, N_SAMPLES_EVAL, EVAL_PROMPTS
+from config import TARGET_LAYERS, N_SAMPLES_EVAL, EVAL_PROMPTS, MIN_PROMPTS_STEERING
 from data import load_research_data
 from model import GemmaWithSAE
 from experiments.exp9_layer_sweep_steering import build_steering_vector
@@ -163,8 +163,15 @@ def main():
         source_lang="en",
     )
 
-    # Build prompt sets
-    base_prompts = EVAL_PROMPTS[: max(N_SAMPLES_EVAL, 50)]
+    # Build prompt sets with minimum sample size for statistical rigor
+    n_prompts = max(N_SAMPLES_EVAL, MIN_PROMPTS_STEERING, 50)
+    base_prompts = EVAL_PROMPTS[:n_prompts] if len(EVAL_PROMPTS) >= n_prompts else EVAL_PROMPTS
+    
+    if len(base_prompts) < MIN_PROMPTS_STEERING:
+        print(
+            f"[exp16] WARNING: Only {len(base_prompts)} prompts available "
+            f"(recommend >= {MIN_PROMPTS_STEERING} for statistical reliability)"
+        )
     en_plus_deva = make_en_plus_deva(base_prompts)
     hinglish_mix = make_hinglish_mix(base_prompts)
 

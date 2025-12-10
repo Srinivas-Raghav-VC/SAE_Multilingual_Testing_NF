@@ -31,6 +31,7 @@ from config import (
     EVAL_PROMPTS,
     SCRIPT_RANGES,
     N_SAMPLES_EVAL,
+    MIN_PROMPTS_STEERING,
 )
 from data import load_flores, load_research_data
 from model import GemmaWithSAE
@@ -356,10 +357,10 @@ def main():
         print("ERROR: Could not load required train data for hi/en/de!")
         return
 
-    if len(prompts) < 50:
+    if len(prompts) < MIN_PROMPTS_STEERING:
         print(
-            f"[exp4] Warning: only {len(prompts)} steering prompts available; "
-            "spillover estimates may be noisy."
+            f"[exp4] WARNING: only {len(prompts)} steering prompts available "
+            f"(recommend >= {MIN_PROMPTS_STEERING} for statistically reliable spillover estimates)"
         )
     print(f"Using {len(prompts)} evaluation prompts")
     

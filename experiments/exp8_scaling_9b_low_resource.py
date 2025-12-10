@@ -32,6 +32,8 @@ from config import (
     MODEL_ID_9B,
     SAE_RELEASE_2B,
     SAE_RELEASE_9B,
+    SAE_WIDTH_2B,
+    SAE_WIDTH_9B,
     EXTENDED_LANGUAGES,
 )
 from data import load_flores
@@ -48,6 +50,7 @@ class ModelConfig:
     name: str
     model_id: str
     sae_release: str
+    sae_width: str = "16k"
 
 
 def compute_language_feature_counts(
@@ -126,9 +129,10 @@ def main():
     print("=" * 60)
 
     # Two model variants: 2B (default) and 9B (if available)
+    # Note: 9B SAEs may have different layer configurations than 2B
     model_variants = [
-        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID, sae_release=SAE_RELEASE_2B),
-        ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B),
+        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID, sae_release=SAE_RELEASE_2B, sae_width=SAE_WIDTH_2B),
+        ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B, sae_width=SAE_WIDTH_9B),
     ]
 
     # Load FLORES data once (including low-resource languages from EXTENDED_LANGUAGES)
@@ -158,7 +162,9 @@ def main():
         print("ERROR: Need English and Hindi data for steering comparison.")
         return
 
-    prompts = EVAL_PROMPTS[:10]
+    # Use at least 50 prompts for statistically meaningful steering comparisons
+    # (increased from 10 for research rigor)
+    prompts = EVAL_PROMPTS[:50] if len(EVAL_PROMPTS) >= 50 else EVAL_PROMPTS
 
     # Use a few representative layers
     layers_to_test = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]
@@ -177,8 +183,22 @@ def main():
             model = GemmaWithSAE(
                 model_id=cfg.model_id,
                 sae_release=cfg.sae_release,
+                sae_width=cfg.sae_width,
             )
             model.load_model()
+            
+            # Validate SAE availability for this model variant
+            # Try loading one SAE to verify the release/width combination exists
+            test_layer = layers_to_test[0]
+            try:
+                _ = model.load_sae(test_layer)
+                print(f"  ✓ SAE validation passed for {cfg.name} at layer {test_layer}")
+            except Exception as sae_err:
+                print(f"  ✗ SAE validation failed for {cfg.name}: {sae_err}")
+                print(f"    SAE release: {cfg.sae_release}, width: {cfg.sae_width}")
+                print(f"    This model variant will be skipped.")
+                continue
+                
         except Exception as e:
             print(f"  GPU load failed for {cfg.name}: {e}")
             print("  Retrying on CPU for scaling analysis (may be slow).")
@@ -187,8 +207,18 @@ def main():
                     device="cpu",
                     model_id=cfg.model_id,
                     sae_release=cfg.sae_release,
+                    sae_width=cfg.sae_width,
                 )
                 model.load_model()
+                
+                # Validate SAE on CPU as well
+                test_layer = layers_to_test[0]
+                try:
+                    _ = model.load_sae(test_layer)
+                except Exception as sae_err:
+                    print(f"  ✗ SAE validation failed for {cfg.name} on CPU: {sae_err}")
+                    continue
+                    
             except Exception as e2:
                 print(f"  Skipping {cfg.name}: could not load model/SAE on CPU either ({e2})")
                 continue

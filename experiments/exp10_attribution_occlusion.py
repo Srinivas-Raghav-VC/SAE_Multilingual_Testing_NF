@@ -181,7 +181,9 @@ def main():
         return
 
     # Prompts for attribution and steering evaluation
-    prompts = EVAL_PROMPTS[:15]
+    # Use at least 30 prompts for statistically meaningful occlusion scores
+    # (increased from 15 for research rigor)
+    prompts = EVAL_PROMPTS[:30] if len(EVAL_PROMPTS) >= 30 else EVAL_PROMPTS
 
     # For simplicity, probe a single layer from TARGET_LAYERS that is mid/late
     layer_candidates = [l for l in TARGET_LAYERS if 10 <= l <= 24]

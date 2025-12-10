@@ -399,32 +399,58 @@ def summarize_exp4(out, data: Dict[str, Any]) -> None:
         out.write("exp4_spillover.json not found.\n")
         return
 
-    _write_header(out, "Experiment 4 – Language Steering Spillover (EN→HI)")
+    _write_header(out, "Experiment 4 – Language Steering Spillover (EN→HI vs EN→DE)")
 
-    layers = data.get("layers", {})
+    # Handle both old format ("layers") and new format ("en_to_hi_layers", "en_to_de_layers")
+    layers_hi = data.get("en_to_hi_layers", data.get("layers", {}))
+    layers_de = data.get("en_to_de_layers", {})
     tests = data.get("hypothesis_tests", {})
-    family = data.get("family_analysis", {})
+    family_hi = data.get("family_analysis_en_to_hi", data.get("family_analysis", {}))
+    family_de = data.get("family_analysis_en_to_de", {})
 
-    out.write("Hypothesis tests (using late layer):\n")
+    out.write("Hypothesis tests (using late layer, EN→HI):\n")
     for k, v in tests.items():
         out.write(f"  {k}: {'PASS' if v else 'FAIL'}\n")
 
-    out.write("\nExample spillover matrix by layer and strength (hi/ur/bn/en/de):\n")
-    out.write(f"{'Layer':<8} {'Strength':<10} {'hi%':>8} {'ur%':>8} {'bn%':>8} {'en%':>8} {'de%':>8}\n")
-    out.write("-" * 60 + "\n")
-    for layer_str in sorted(layers.keys(), key=int):
-        for strength_str, res in layers[layer_str].items():
-            dist = res.get("language_distribution", {})
-            out.write(
-                f"{layer_str:<8} {strength_str:<10}"
-                f"{dist.get('hi', 0):>8.1f}{dist.get('ur', 0):>8.1f}"
-                f"{dist.get('bn', 0):>8.1f}{dist.get('en', 0):>8.1f}"
-                f"{dist.get('de', 0):>8.1f}\n"
-            )
+    # EN→HI spillover matrix
+    if layers_hi:
+        out.write("\nEN→HI spillover matrix by layer and strength (hi/ur/bn/en/de):\n")
+        out.write(f"{'Layer':<8} {'Strength':<10} {'hi%':>8} {'ur%':>8} {'bn%':>8} {'en%':>8} {'de%':>8}\n")
+        out.write("-" * 60 + "\n")
+        for layer_str in sorted(layers_hi.keys(), key=lambda x: int(x)):
+            for strength_str, res in sorted(layers_hi[layer_str].items(), key=lambda x: float(x[0])):
+                dist = res.get("language_distribution", {})
+                out.write(
+                    f"{layer_str:<8} {strength_str:<10}"
+                    f"{dist.get('hi', 0):>8.1f}{dist.get('ur', 0):>8.1f}"
+                    f"{dist.get('bn', 0):>8.1f}{dist.get('en', 0):>8.1f}"
+                    f"{dist.get('de', 0):>8.1f}\n"
+                )
+
+    # EN→DE spillover matrix (control)
+    if layers_de:
+        out.write("\nEN→DE (control) spillover matrix by layer and strength:\n")
+        out.write(f"{'Layer':<8} {'Strength':<10} {'hi%':>8} {'ur%':>8} {'bn%':>8} {'en%':>8} {'de%':>8}\n")
+        out.write("-" * 60 + "\n")
+        for layer_str in sorted(layers_de.keys(), key=lambda x: int(x)):
+            for strength_str, res in sorted(layers_de[layer_str].items(), key=lambda x: float(x[0])):
+                dist = res.get("language_distribution", {})
+                out.write(
+                    f"{layer_str:<8} {strength_str:<10}"
+                    f"{dist.get('hi', 0):>8.1f}{dist.get('ur', 0):>8.1f}"
+                    f"{dist.get('bn', 0):>8.1f}{dist.get('en', 0):>8.1f}"
+                    f"{dist.get('de', 0):>8.1f}\n"
+                )
 
     out.write("\nFamily-level spillover (Indo-Aryan vs others) by strength:\n")
-    for strength, fams in family.items():
-        out.write(f"  strength={strength}: {fams}\n")
+    if family_hi:
+        out.write("  EN→HI:\n")
+        for strength, fams in family_hi.items():
+            out.write(f"    strength={strength}: {fams}\n")
+    if family_de:
+        out.write("  EN→DE (control):\n")
+        for strength, fams in family_de.items():
+            out.write(f"    strength={strength}: {fams}\n")
 
 
 def summarize_exp7(out, data: Any) -> None:

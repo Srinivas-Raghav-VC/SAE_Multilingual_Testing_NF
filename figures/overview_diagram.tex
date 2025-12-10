@@ -1,0 +1,65 @@
+\documentclass[tikz,border=10pt]{standalone}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, calc, backgrounds, fit}
+
+\definecolor{gemma_blue}{RGB}{66, 133, 244}
+\definecolor{sae_orange}{RGB}{255, 109, 0}
+\definecolor{indic_green}{RGB}{52, 168, 83}
+\definecolor{steer_purple}{RGB}{170, 0, 255}
+
+\begin{document}
+\begin{tikzpicture}[
+    font=\sffamily,
+    layer/.style={draw, fill=white, minimum width=2.5cm, minimum height=0.8cm, rounded corners=2pt, drop shadow},
+    feature/.style={circle, draw=sae_orange, fill=sae_orange!10, inner sep=0pt, minimum size=0.6cm},
+    steer_vec/.style={single arrow, draw=none, fill=steer_purple!80, minimum height=1.5cm, text=white}
+]
+
+% 1. Model Backbone (Gemma)
+\node[layer, fill=gemma_blue!10, label=left:\textbf{Gemma 2}] (L1) {Layer 1};
+\node[layer, fill=gemma_blue!10, above=0.3cm of L1] (L5) {Layer 5};
+\node[layer, fill=gemma_blue!20, above=0.3cm of L5] (L13) {Layer 13};
+\node[layer, fill=gemma_blue!20, above=0.3cm of L13] (L20) {Layer 20};
+\node[layer, fill=gemma_blue!10, above=0.3cm of L20] (L24) {Layer 24};
+
+\draw[dotted, thick] (L1) -- (L5);
+\draw[dotted, thick] (L5) -- (L13);
+\draw[dotted, thick] (L13) -- (L20);
+\draw[dotted, thick] (L20) -- (L24);
+
+% 2. Input
+\node[below=1cm of L1, align=center] (input) {\textit{"The capital of India is"}};
+\draw[-{Latex[width=2mm,length=2mm]}, thick] (input) -- (L1);
+
+% 3. SAE Extraction (Callout from Layer 13)
+\node[right=2.5cm of L13, draw=sae_orange, thick, rounded corners, minimum width=3cm, minimum height=4cm, label={[sae_orange]above:\textbf{Gemma Scope SAE}}] (sae_box) {};
+
+% Connection to SAE
+\draw[->, dashed, thick, sae_orange] (L13.east) -- node[above, font=\small] {Residual} (sae_box.west);
+
+% Features inside SAE
+\node[feature, align=center] (f1) at ($(sae_box.north)!0.3!(sae_box.south)$) {$f_{23}$};
+\node[feature, align=center] (f2) at ($(sae_box.north)!0.5!(sae_box.south)$) {$f_{99}$};
+\node[feature, align=center] (f3) at ($(sae_box.north)!0.7!(sae_box.south)$) {$f_{k}$};
+
+% Detector/Generator Labels
+\node[right=0.2cm of f1, font=\scriptsize, align=left, text=gray] {Detector\\(Monolingual)};
+\node[right=0.2cm of f2, font=\scriptsize, align=left, text=steer_purple] {\textbf{Generator}\\(Active)};
+
+% 4. Steering Vector Construction
+\node[right=3.5cm of L20, text=steer_purple, align=center] (steering_label) {\textbf{Steering Vector}\\\alpha \cdot \sum w_{dec}}$;
+\draw[->, ultra thick, steer_purple] (f2.east) -| ++(0.5,0) |- (steering_label.west);
+
+% Injecting back into Layer 20 (Intervention)
+\draw[-{Latex[width=3mm,length=3mm]}, ultra thick, steer_purple] (steering_label.south) -- (L20.east);
+
+% 5. Output
+\node[above=1cm of L24, align=center, text=indic_green] (output) {\textbf{Output:}\\ \textit{"नई दिल्ली (New Delhi)"}}; 
+\draw[-{Latex[width=2mm,length=2mm]}, thick] (L24) -- (output);
+
+% 6. Grouping/Background
+\begin{scope}[on background layer]
+    \node[fit=(input)(output)(sae_box)(steering_label), inner sep=0.5cm] (bg) {};
+\end{scope}
+
+\end{tikzpicture}
+\end{document}

@@ -152,6 +152,50 @@ class CalibratedJudgeResult:
 
 
 @dataclass
+class SeparateMetrics:
+    """Individual metrics reported SEPARATELY (not combined).
+
+    This addresses the reviewer concern about conflating different success criteria.
+    Each metric should be analyzed independently to understand trade-offs.
+    """
+    # Script metrics (binary + continuous)
+    script_success_rate: float          # Fraction with is_target_script=True
+    script_success_ci: Tuple[float, float]  # 95% bootstrap CI
+    avg_script_ratio: float             # Mean target script ratio
+    script_ratio_ci: Tuple[float, float]
+
+    # Semantic preservation (continuous)
+    semantic_mean: Optional[float]      # Mean LaBSE similarity
+    semantic_ci: Optional[Tuple[float, float]]
+    semantic_preservation_rate: Optional[float]  # Fraction >= threshold
+
+    # Degradation (binary + continuous)
+    degradation_rate: float             # Fraction with is_degraded=True
+    degradation_ci: Tuple[float, float]
+    avg_repetition_3gram: float
+    avg_repetition_5gram: float
+
+    # Combined (for reference, but NOT primary metric)
+    combined_success_rate: float        # Script AND semantic AND not-degraded
+
+    def to_dict(self) -> Dict:
+        return {
+            "script_success_rate": self.script_success_rate,
+            "script_success_ci": list(self.script_success_ci),
+            "avg_script_ratio": self.avg_script_ratio,
+            "script_ratio_ci": list(self.script_ratio_ci),
+            "semantic_mean": self.semantic_mean,
+            "semantic_ci": list(self.semantic_ci) if self.semantic_ci else None,
+            "semantic_preservation_rate": self.semantic_preservation_rate,
+            "degradation_rate": self.degradation_rate,
+            "degradation_ci": list(self.degradation_ci),
+            "avg_repetition_3gram": self.avg_repetition_3gram,
+            "avg_repetition_5gram": self.avg_repetition_5gram,
+            "combined_success_rate": self.combined_success_rate,
+        }
+
+
+@dataclass
 class AggregateResults:
     """Aggregated results across multiple evaluations.
 
@@ -162,7 +206,7 @@ class AggregateResults:
     n_samples: int
     success_rate: float                    # Script-based (is_target_script)
     semantic_success_rate: Optional[float] # Script + semantic
-    
+
     avg_target_script_ratio: float
     avg_semantic_similarity: Optional[float]
     avg_repetition_3gram: float
@@ -171,33 +215,75 @@ class AggregateResults:
     # Number of outputs where script detection found no alphabetic
     # characters (possible degenerate generations).
     n_empty_outputs: int = 0
-    
+
     # LLM judge (if calibrated)
     calibrated_result: Optional[CalibratedJudgeResult] = None
-    
+
     # Per-strength breakdown
     per_strength: Dict[float, Dict] = field(default_factory=dict)
+
+    # NEW: Separate metrics with CIs (for rigorous reporting)
+    separate_metrics: Optional[SeparateMetrics] = None
+
+    # NEW: Per-prompt raw values for downstream statistical testing
+    per_prompt_script_success: Optional[List[int]] = None  # 0/1 per prompt
+    per_prompt_semantic_sim: Optional[List[float]] = None
+    per_prompt_degraded: Optional[List[int]] = None  # 0/1 per prompt
 
 
 # =============================================================================
 # SCRIPT DETECTION (IMPROVED - rejects code-mixed)
 # =============================================================================
 
+def _char_in_ranges(char: str, ranges) -> bool:
+    """Check if character falls within any of the given ranges.
+
+    Args:
+        char: Single character
+        ranges: Either a tuple (start, end) or a list of tuples [(start1, end1), ...]
+
+    Returns:
+        True if char falls within any range
+    """
+    code = ord(char)
+
+    # Handle legacy single-range format: (start, end)
+    if isinstance(ranges, tuple) and len(ranges) == 2 and isinstance(ranges[0], int):
+        return ranges[0] <= code <= ranges[1]
+
+    # Handle new multi-range format: [(start1, end1), (start2, end2), ...]
+    if isinstance(ranges, list):
+        for start, end in ranges:
+            if start <= code <= end:
+                return True
+        return False
+
+    return False
+
+
 def detect_scripts(text: str) -> Dict[str, float]:
-    """Detect script distribution over alphabetic characters."""
+    """Detect script distribution over alphabetic characters.
+
+    Supports both legacy single-range and new multi-range script definitions.
+    Uses Unicode category checking for robust alpha detection.
+    """
     if not text:
         return {}
-    
-    alpha_chars = [c for c in text if c.isalpha()]
+
+    # Use unicodedata for robust alphabetic character detection
+    # This handles all Unicode alphabetic characters correctly
+    import unicodedata
+    alpha_chars = [c for c in text if unicodedata.category(c).startswith('L')]
     total_alpha = len(alpha_chars)
+
     if total_alpha == 0:
         return {}
-    
+
     ratios = {}
-    for script_name, (start, end) in SCRIPT_RANGES.items():
-        count = sum(1 for c in text if start <= ord(c) <= end)
+    for script_name, ranges in SCRIPT_RANGES.items():
+        count = sum(1 for c in text if _char_in_ranges(c, ranges))
         ratios[script_name] = count / total_alpha
-    
+
     return ratios
 
 
@@ -322,7 +408,21 @@ def is_degraded(
 # =============================================================================
 
 def jaccard_overlap(set_a: Set, set_b: Set) -> float:
-    """CORRECT Jaccard overlap: |A∩B| / |A∪B|, always in [0, 1]."""
+    """CORRECT Jaccard overlap: |A∩B| / |A∪B|, always in [0, 1].
+    
+    This is the mathematically correct Jaccard similarity coefficient.
+    Any value outside [0, 1] indicates a bug in the computation.
+    
+    Args:
+        set_a: First set
+        set_b: Second set
+        
+    Returns:
+        Jaccard similarity in range [0, 1]
+        
+    Raises:
+        AssertionError: If result is outside [0, 1] (indicates a bug)
+    """
     if not set_a and not set_b:
         return 0.0
     
@@ -330,7 +430,13 @@ def jaccard_overlap(set_a: Set, set_b: Set) -> float:
     union = len(set_a | set_b)
     
     result = intersection / union
-    assert 0.0 <= result <= 1.0, f"Invalid Jaccard: {result}"
+    
+    # Research rigor: validate the mathematical invariant
+    assert 0.0 <= result <= 1.0, (
+        f"BUG: Invalid Jaccard coefficient {result}. "
+        f"This should NEVER happen. "
+        f"|A|={len(set_a)}, |B|={len(set_b)}, |A∩B|={intersection}, |A∪B|={union}"
+    )
     return result
 
 
@@ -842,11 +948,31 @@ def evaluate_steering_output(
     )
 
 
+def _bootstrap_ci_simple(values: List[float], n_bootstrap: int = 2000, seed: int = 42) -> Tuple[float, float]:
+    """Simple bootstrap CI computation (avoids circular import with stats.py)."""
+    if not values or len(values) < 2:
+        mean_val = np.mean(values) if values else 0.0
+        return (mean_val, mean_val)
+
+    rng = np.random.RandomState(seed)
+    n = len(values)
+    arr = np.array(values)
+
+    bootstrap_means = []
+    for _ in range(n_bootstrap):
+        resample = rng.choice(arr, size=n, replace=True)
+        bootstrap_means.append(np.mean(resample))
+
+    return (float(np.percentile(bootstrap_means, 2.5)), float(np.percentile(bootstrap_means, 97.5)))
+
+
 def aggregate_results(
     results: List[SteeringEvalResult],
     target_script: str = "devanagari",
+    _warn_on_default: bool = True,
+    compute_separate_metrics: bool = True,
 ) -> AggregateResults:
-    """Aggregate evaluation results.
+    """Aggregate evaluation results with separate metrics and bootstrap CIs.
 
     Args:
         results: List of SteeringEvalResult objects.
@@ -854,7 +980,30 @@ def aggregate_results(
             avg_target_script_ratio. This should match the target language
             for the steering experiment, e.g. "devanagari" for Hindi,
             "bengali" for Bengali, "tamil" for Tamil, etc.
+        _warn_on_default: Internal flag; set False to suppress the default warning.
+        compute_separate_metrics: If True, compute detailed SeparateMetrics with CIs.
+
+    Note:
+        Always explicitly pass target_script for non-Hindi languages to avoid
+        incorrect script ratio calculations.
     """
+    # Research rigor: warn if using default script for potentially non-Hindi evaluation
+    if _warn_on_default and target_script == "devanagari" and results:
+        # Check if any result has a detected language that isn't Hindi
+        non_hindi_detected = any(
+            r.detected_language not in ("hi", "unknown", "en")
+            for r in results
+            if r.detected_language
+        )
+        if non_hindi_detected:
+            import warnings
+            warnings.warn(
+                "aggregate_results() using default target_script='devanagari' but "
+                "some outputs were detected as non-Hindi. Consider passing explicit "
+                "target_script for accurate script ratio calculation.",
+                UserWarning,
+            )
+
     if not results:
         return AggregateResults(
             n_samples=0, success_rate=0.0, semantic_success_rate=None,
@@ -862,39 +1011,85 @@ def aggregate_results(
             avg_repetition_3gram=0.0, avg_repetition_5gram=0.0,
             degradation_rate=0.0, n_empty_outputs=0
         )
-    
+
     n = len(results)
-    
+
+    # Per-prompt binary indicators (for downstream statistical testing)
+    per_prompt_script = [1 if r.is_target_script else 0 for r in results]
+    per_prompt_degraded = [1 if r.is_degraded else 0 for r in results]
+
     # Script success
-    script_success = sum(1 for r in results if r.is_target_script) / n
-    
+    script_success = sum(per_prompt_script) / n
+
     # Target script ratio and empty-output tracking (no alphabetic chars)
     n_empty_outputs = sum(1 for r in results if not r.script_ratios)
     target_ratios = [r.script_ratios.get(target_script, 0.0) for r in results]
-    
+
     # Semantic
     sem_values = [r.semantic_similarity for r in results if r.semantic_similarity >= 0]
-    avg_sem = np.mean(sem_values) if sem_values else None
-    
+    per_prompt_semantic = [r.semantic_similarity for r in results]  # May include -1.0
+    avg_sem = float(np.mean(sem_values)) if sem_values else None
+
     # Semantic + script success
     sem_success = None
     if sem_values:
         sem_success_count = sum(1 for r in results if r.overall_success)
         sem_success = sem_success_count / n
-    
+
     # Degradation
-    deg_rate = sum(1 for r in results if r.is_degraded) / n
-    
+    deg_rate = sum(per_prompt_degraded) / n
+
+    # Compute separate metrics with bootstrap CIs if requested
+    separate_metrics = None
+    if compute_separate_metrics and n >= 5:  # Need minimum samples for meaningful CI
+        # Script success CI
+        script_ci = _bootstrap_ci_simple(per_prompt_script)
+
+        # Script ratio CI
+        ratio_ci = _bootstrap_ci_simple(target_ratios)
+
+        # Semantic CI (only for valid values)
+        sem_ci = None
+        sem_pres_rate = None
+        if sem_values:
+            sem_ci = _bootstrap_ci_simple(sem_values)
+            sem_pres_rate = sum(1 for v in sem_values if v >= SEMANTIC_SIM_THRESHOLD) / len(sem_values)
+
+        # Degradation CI
+        deg_ci = _bootstrap_ci_simple(per_prompt_degraded)
+
+        # Combined success (script AND semantic AND not-degraded)
+        combined_success = sum(1 for r in results if r.overall_success) / n
+
+        separate_metrics = SeparateMetrics(
+            script_success_rate=script_success,
+            script_success_ci=script_ci,
+            avg_script_ratio=float(np.mean(target_ratios)),
+            script_ratio_ci=ratio_ci,
+            semantic_mean=avg_sem,
+            semantic_ci=sem_ci,
+            semantic_preservation_rate=sem_pres_rate,
+            degradation_rate=deg_rate,
+            degradation_ci=deg_ci,
+            avg_repetition_3gram=float(np.mean([r.repetition_3gram for r in results])),
+            avg_repetition_5gram=float(np.mean([r.repetition_5gram for r in results])),
+            combined_success_rate=combined_success,
+        )
+
     return AggregateResults(
         n_samples=n,
         success_rate=script_success,
         semantic_success_rate=sem_success,
-        avg_target_script_ratio=np.mean(target_ratios),
+        avg_target_script_ratio=float(np.mean(target_ratios)),
         avg_semantic_similarity=avg_sem,
-        avg_repetition_3gram=np.mean([r.repetition_3gram for r in results]),
-        avg_repetition_5gram=np.mean([r.repetition_5gram for r in results]),
+        avg_repetition_3gram=float(np.mean([r.repetition_3gram for r in results])),
+        avg_repetition_5gram=float(np.mean([r.repetition_5gram for r in results])),
         degradation_rate=deg_rate,
         n_empty_outputs=n_empty_outputs,
+        separate_metrics=separate_metrics,
+        per_prompt_script_success=per_prompt_script,
+        per_prompt_semantic_sim=per_prompt_semantic,
+        per_prompt_degraded=per_prompt_degraded,
     )
 
 

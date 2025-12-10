@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import torch
 from tqdm import tqdm
 
-from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, N_SAMPLES_EVAL, STEERING_STRENGTHS, EVAL_PROMPTS
+from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, N_SAMPLES_EVAL, STEERING_STRENGTHS, EVAL_PROMPTS, MIN_PROMPTS_CAUSAL_PROBING
 from data import load_research_data
 from model import GemmaWithSAE
 from experiments.exp1_feature_discovery import compute_activation_rates, compute_monolinguality
@@ -197,10 +197,10 @@ def main():
     # distinct from the training texts used for candidate selection.
     num_prompts = min(max(N_SAMPLES_EVAL, 50), len(prompts_all))
     prompts = prompts_all[:num_prompts]
-    if num_prompts < 20:
+    if num_prompts < MIN_PROMPTS_CAUSAL_PROBING:
         print(
-            f"[exp7] Warning: only {num_prompts} FLORES prompts available; "
-            "feature-level effect estimates may be noisy."
+            f"[exp7] WARNING: only {num_prompts} prompts available "
+            f"(recommend >= {MIN_PROMPTS_CAUSAL_PROBING} for statistically reliable causal effect estimates)"
         )
 
     # Use a small subset of layers for cost
@@ -212,7 +212,9 @@ def main():
 
     for layer in probe_layers:
         print(f"\nSelecting candidates at layer {layer}...")
-        candidates = select_candidates(model, texts_en, texts_hi, layer, top_k=5)
+        # Use top_k=10 for better statistical coverage of the feature space
+        # (increased from 5 for research rigor)
+        candidates = select_candidates(model, texts_en, texts_hi, layer, top_k=10)
 
         for method_name, feat_list in candidates.items():
             for feat in feat_list:

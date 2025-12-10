@@ -28,27 +28,57 @@ from data import load_flores, load_samanantar_multilingual
 from model import GemmaWithSAE
 
 
-def compute_activation_rates(model, texts, layer):
+def compute_activation_rates(model, texts, layer, per_sentence: bool = True):
     """Compute per-feature activation rates across texts.
 
-    We treat a feature as "active" when its SAE activation is > 0 and
-    estimate P(active) as the fraction of tokens for which this holds.
-    To reduce the influence of extremely weak, noisy activations, we
-    also implicitly discard features whose target-language activation
-    rate is below a small floor in `compute_monolinguality`.
+    We treat a feature as "active" when its SAE activation is > 0.
+
+    Args:
+        model: GemmaWithSAE instance
+        texts: List of text samples
+        layer: Layer to analyze
+        per_sentence: If True (default), compute P(feature active | sentence)
+                     as the fraction of sentences where the feature activates
+                     on ANY token. This prevents longer sentences from dominating.
+                     If False, use token-level computation (legacy behavior).
+
+    Returns:
+        Tensor of shape (n_features,) with activation rates in [0, 1]
     """
     sae = model.load_sae(layer)
     n_features = sae.cfg.d_sae
-    
-    activation_counts = torch.zeros(n_features, device=model.device)
-    total_tokens = 0
-    
-    for text in tqdm(texts, desc=f"Layer {layer}", leave=False):
-        acts = model.get_sae_activations(text, layer)  # (seq_len, n_features)
-        activation_counts += (acts > 0).float().sum(dim=0)
-        total_tokens += acts.shape[0]
-    
-    return activation_counts / total_tokens  # P(feature activates)
+
+    if per_sentence:
+        # Per-sentence activation: feature is "active" if it fires on any token in the sentence
+        # This gives equal weight to each sentence regardless of length
+        sentence_activations = torch.zeros(n_features, device=model.device)
+        n_sentences = 0
+
+        for text in tqdm(texts, desc=f"Layer {layer}", leave=False):
+            acts = model.get_sae_activations(text, layer)  # (seq_len, n_features)
+            # Feature is active in this sentence if it fires on any token
+            any_active = (acts > 0).any(dim=0).float()  # (n_features,)
+            sentence_activations += any_active
+            n_sentences += 1
+
+        if n_sentences == 0:
+            return torch.zeros(n_features, device=model.device)
+
+        return sentence_activations / n_sentences  # P(feature active | sentence)
+    else:
+        # Legacy token-level computation (kept for comparison)
+        activation_counts = torch.zeros(n_features, device=model.device)
+        total_tokens = 0
+
+        for text in tqdm(texts, desc=f"Layer {layer}", leave=False):
+            acts = model.get_sae_activations(text, layer)  # (seq_len, n_features)
+            activation_counts += (acts > 0).float().sum(dim=0)
+            total_tokens += acts.shape[0]
+
+        if total_tokens == 0:
+            return torch.zeros(n_features, device=model.device)
+
+        return activation_counts / total_tokens  # P(feature activates on token)
 
 
 def compute_monolinguality(rates_by_lang, target_lang):
@@ -76,7 +106,17 @@ def compute_monolinguality(rates_by_lang, target_lang):
 
 
 def run_feature_discovery(model, texts_by_lang, layers):
-    """Run feature discovery across layers."""
+    """Run feature discovery across layers.
+    
+    Raises:
+        ValueError: If insufficient data for any language
+    """
+    # Validation: ensure we have sufficient data for statistical reliability
+    MIN_SAMPLES_PER_LANG = 100
+    for lang, texts in texts_by_lang.items():
+        if len(texts) < MIN_SAMPLES_PER_LANG:
+            print(f"WARNING: {lang} has only {len(texts)} samples (recommend >= {MIN_SAMPLES_PER_LANG})")
+    
     results = {}
     
     for layer in layers:
@@ -92,22 +132,32 @@ def run_feature_discovery(model, texts_by_lang, layers):
         
         for lang in texts_by_lang.keys():
             mono = compute_monolinguality(rates_by_lang, lang)
-            
+
             # Find features above threshold
             specific_mask = mono > MONOLINGUALITY_THRESHOLD
-            specific_ids = specific_mask.nonzero().squeeze(-1).tolist()
-            if isinstance(specific_ids, int):
-                specific_ids = [specific_ids]
-            
+            nonzero_result = specific_mask.nonzero(as_tuple=False)
+
+            # Handle all edge cases for feature list extraction
+            if nonzero_result.numel() == 0:
+                specific_ids = []
+            elif nonzero_result.dim() == 1:
+                specific_ids = nonzero_result.tolist()
+            else:
+                # nonzero returns (N, 1) tensor, squeeze and convert
+                specific_ids = nonzero_result.squeeze(-1).tolist()
+                # Handle single-element case where squeeze returns scalar
+                if isinstance(specific_ids, int):
+                    specific_ids = [specific_ids]
+
             # Store with scores
             features = [(fid, mono[fid].item()) for fid in specific_ids]
             features.sort(key=lambda x: x[1], reverse=True)
             layer_results["lang_features"][lang] = features
-            
+
             # Dead features (never activate for this language)
             dead = (rates_by_lang[lang] < 1e-6).sum().item()
             layer_results["dead_features"][lang] = dead
-            
+
             print(f"  {lang}: {len(features)} features (M>{MONOLINGUALITY_THRESHOLD}), {dead} dead")
         
         results[layer] = layer_results

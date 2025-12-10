@@ -35,7 +35,7 @@ import json
 
 from tqdm import tqdm
 
-from config import TARGET_LAYERS, N_SAMPLES_EVAL
+from config import TARGET_LAYERS, N_SAMPLES_EVAL, LANG_TO_SCRIPT
 from data import load_research_data
 from model import GemmaWithSAE
 from experiments.exp9_layer_sweep_steering import build_steering_vector
@@ -44,13 +44,8 @@ from evaluation_comprehensive import evaluate_steering_output, aggregate_results
 
 INDIC_LANGS = ["hi", "bn", "ta", "te", "ur"]
 
-LANG_TO_SCRIPT = {
-    "hi": "devanagari",
-    "bn": "bengali",
-    "ta": "tamil",
-    "te": "telugu",
-    "ur": "arabic",
-}
+# Use centralized LANG_TO_SCRIPT from config.py for consistency
+# (imported above)
 
 
 def eval_direction(
@@ -160,7 +155,10 @@ def main():
         )
 
         prompts_en = steering_prompts
-        script_l = LANG_TO_SCRIPT.get(lang, "devanagari")
+        script_l = LANG_TO_SCRIPT.get(lang)
+        if script_l is None:
+            print(f"  WARNING: No script mapping for language '{lang}', defaulting to 'devanagari'")
+            script_l = "devanagari"
         print("  Evaluating EN→L...")
         en_to_l_res = eval_direction(
             model,

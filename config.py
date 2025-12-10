@@ -28,7 +28,13 @@ MODEL_ID_9B = "google/gemma-2-9b"
 SAE_RELEASE = "gemma-scope-2b-pt-res-canonical"
 SAE_RELEASE_2B = "gemma-scope-2b-pt-res-canonical"
 SAE_RELEASE_9B = "gemma-scope-9b-pt-res-canonical"
+
+# SAE width configuration
+# Available widths in Gemma Scope: "16k", "32k", "65k", "131k", "262k", "524k", "1m"
+# Default to 16k for balance between interpretability and coverage
 SAE_WIDTH = "16k"
+SAE_WIDTH_2B = "16k"
+SAE_WIDTH_9B = "16k"
 
 # Attention implementation (use "eager" for compatibility)
 ATTN_IMPLEMENTATION = "eager"  # "flash_attention_2" requires specific GPU/driver
@@ -108,6 +114,17 @@ N_STEERING_EVAL = 200
 TRAIN_TEST_SPLIT = 0.8
 
 # =============================================================================
+# MINIMUM SAMPLE SIZES FOR RESEARCH RIGOR
+# =============================================================================
+# These are minimum thresholds for statistically meaningful results.
+# Experiments will warn if sample sizes fall below these thresholds.
+
+MIN_SAMPLES_PER_LANGUAGE = 100      # Minimum texts per language for feature discovery
+MIN_PROMPTS_STEERING = 30           # Minimum prompts for steering evaluation
+MIN_PROMPTS_CAUSAL_PROBING = 20     # Minimum prompts for causal effect estimation
+MIN_FEATURES_FOR_STEERING = 5       # Minimum features to consider for steering vector
+
+# =============================================================================
 # THRESHOLDS
 # =============================================================================
 
@@ -139,13 +156,63 @@ SEMANTIC_SIM_THRESHOLD = 0.7
 
 STEERING_STRENGTHS = [0.5, 1.0, 2.0, 4.0, 8.0]
 NUM_FEATURES = 25
-NUM_FEATURES_OPTIONS = [10, 25, 50]
+NUM_FEATURES_OPTIONS = [10, 25, 50, 100]  # For sensitivity analysis
 
 STEERING_METHODS = ["activation_diff", "monolinguality", "random", "dense"]
 
 # =============================================================================
+# SENSITIVITY ANALYSIS THRESHOLDS
+# =============================================================================
+# These are used for robustness checks - experiments should report results
+# at multiple threshold values to show stability.
+
+SENSITIVITY_THRESHOLDS = {
+    # Jaccard overlap: feature activation rate thresholds
+    "jaccard_activation_rates": [0.01, 0.02, 0.05, 0.1],
+
+    # Monolinguality: different selectivity thresholds
+    "monolinguality_thresholds": [2.0, 3.0, 5.0, 10.0],
+
+    # Script detection: success thresholds
+    "script_success_thresholds": [0.3, 0.5, 0.7, 0.85],
+
+    # Semantic similarity: preservation thresholds
+    "semantic_thresholds": [0.5, 0.6, 0.7, 0.8],
+
+    # Feature counts for steering
+    "num_features_options": [10, 25, 50, 100],
+}
+
+# =============================================================================
+# STATISTICAL TESTING CONFIGURATION
+# =============================================================================
+
+STATISTICAL_CONFIG = {
+    # Bootstrap
+    "n_bootstrap": 10000,
+    "confidence_level": 0.95,
+    "seed": 42,
+
+    # Multiple comparison correction
+    "correction_method": "holm",  # "bonferroni", "holm", "fdr"
+    "alpha": 0.05,
+
+    # Effect size interpretation thresholds (Cohen's d)
+    "effect_size_small": 0.2,
+    "effect_size_medium": 0.5,
+    "effect_size_large": 0.8,
+
+    # Minimum samples for reliable statistics
+    "min_samples_for_ci": 10,
+    "min_samples_for_test": 5,
+}
+
+# =============================================================================
 # EVALUATION PROMPTS
 # =============================================================================
+# These prompts are used for steering evaluation across experiments.
+# For statistical reliability, we recommend at least MIN_PROMPTS_STEERING prompts.
+# Additional prompts are loaded from FLORES English sentences at runtime.
 
 EVAL_PROMPTS = [
     # Simple questions
@@ -185,10 +252,57 @@ EVAL_PROMPTS = [
 ]
 
 # =============================================================================
+# LANGUAGE TO SCRIPT MAPPING
+# =============================================================================
+# Centralized mapping from language codes to script names used in evaluation.
+# This ensures consistent target_script handling across all experiments.
+
+LANG_TO_SCRIPT = {
+    "hi": "devanagari",
+    "ur": "arabic",
+    "bn": "bengali",
+    "ta": "tamil",
+    "te": "telugu",
+    "kn": "kannada",
+    "ml": "malayalam",
+    "gu": "gujarati",
+    "pa": "gurmukhi",
+    "or": "oriya",
+    "mr": "devanagari",  # Marathi uses Devanagari
+    "as": "bengali",     # Assamese uses Bengali script variant
+    "de": "latin",
+    "en": "latin",
+    "fr": "latin",
+    "es": "latin",
+    "ar": "arabic",
+    "zh": "han",
+}
+
+# =============================================================================
 # UNICODE RANGES FOR SCRIPT DETECTION
 # =============================================================================
 
+# Script ranges now support multiple ranges per script for complete coverage
+# Format: script_name -> list of (start, end) tuples
 SCRIPT_RANGES = {
+    "devanagari": [(0x0900, 0x097F), (0xA8E0, 0xA8FF)],  # + Extended Devanagari
+    "arabic": [(0x0600, 0x06FF), (0x0750, 0x077F), (0xFB50, 0xFDFF)],  # + Supplement + Forms-A
+    "bengali": [(0x0980, 0x09FF)],
+    "tamil": [(0x0B80, 0x0BFF)],
+    "telugu": [(0x0C00, 0x0C7F)],
+    "kannada": [(0x0C80, 0x0CFF)],
+    "malayalam": [(0x0D00, 0x0D7F)],
+    "gujarati": [(0x0A80, 0x0AFF)],
+    "gurmukhi": [(0x0A00, 0x0A7F)],
+    "oriya": [(0x0B00, 0x0B7F)],
+    # Latin: Basic + Latin-1 Supplement + Extended-A + Extended-B
+    # This covers German umlauts (ä, ö, ü), French accents, etc.
+    "latin": [(0x0041, 0x007A), (0x00C0, 0x00FF), (0x0100, 0x017F), (0x0180, 0x024F)],
+    "han": [(0x4E00, 0x9FFF), (0x3400, 0x4DBF)],  # + Extension A
+}
+
+# Legacy single-range format for backward compatibility
+SCRIPT_RANGES_SINGLE = {
     "devanagari": (0x0900, 0x097F),
     "arabic": (0x0600, 0x06FF),
     "bengali": (0x0980, 0x09FF),

@@ -1,18 +1,26 @@
 """Model and SAE loading using sae_lens.
 
 Provides GemmaWithSAE class that handles:
-- Model loading (Gemma 2 2B)
-- SAE loading (Gemma Scope)
+- Model loading (Gemma 2 2B or 9B)
+- SAE loading (Gemma Scope) with configurable width and retry logic
 - Hidden state extraction
 - SAE activation computation
-- Steered generation
+- Steered generation with comprehensive validation
+
+Research Rigor Features:
+- Retry logic for SAE loading (handles network failures gracefully)
+- Configurable SAE width for different analysis granularities
+- Validation of steering vector dimensions and layer indices
+- Warnings for near-zero steering vectors
+- Explicit dtype handling to avoid precision bugs
 """
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sae_lens import SAE
 
-from config import MODEL_ID, HIDDEN_DIM, ATTN_IMPLEMENTATION, HF_TOKEN, SAE_RELEASE
+import time
+from config import MODEL_ID, HIDDEN_DIM, ATTN_IMPLEMENTATION, HF_TOKEN, SAE_RELEASE, SAE_WIDTH
 
 
 class GemmaWithSAE:
@@ -24,6 +32,7 @@ class GemmaWithSAE:
         dtype: torch.dtype = torch.bfloat16,
         model_id: str = MODEL_ID,
         sae_release: str = SAE_RELEASE,
+        sae_width: str = SAE_WIDTH,
     ):
         self.device = device if torch.cuda.is_available() else "cpu"
         self.dtype = dtype if self.device == "cuda" else torch.float32
@@ -32,6 +41,7 @@ class GemmaWithSAE:
         self.saes = {}  # layer -> SAE
         self.model_id = model_id
         self.sae_release = sae_release
+        self.sae_width = sae_width
     
     def load_model(self):
         """Load the base Gemma model on a single device.
@@ -71,30 +81,53 @@ class GemmaWithSAE:
         print(f"Model loaded on {self.device}.")
         return self
     
-    def load_sae(self, layer: int):
-        """Load Gemma Scope SAE for a specific layer.
+    def load_sae(self, layer: int, max_retries: int = 3, retry_delay: float = 2.0):
+        """Load Gemma Scope SAE for a specific layer with retry logic.
         
         Args:
             layer: Layer number (0-indexed)
+            max_retries: Maximum number of retry attempts for network failures
+            retry_delay: Delay in seconds between retries
             
         Returns:
             SAE object for that layer
+            
+        Raises:
+            RuntimeError: If SAE cannot be loaded after all retries
         """
         if layer in self.saes:
             return self.saes[layer]
         
-        print(f"Loading SAE for layer {layer} from {self.sae_release}...")
+        sae_id = f"layer_{layer}/width_{self.sae_width}/canonical"
+        print(f"Loading SAE for layer {layer} from {self.sae_release} (width={self.sae_width})...")
         
-        # Gemma Scope SAE naming convention (residual SAEs, width 16k by default)
-        sae, _, _ = SAE.from_pretrained(
-            release=self.sae_release,
-            sae_id=f"layer_{layer}/width_16k/canonical",
-            device=self.device,
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                # Gemma Scope SAE naming convention
+                sae, _, _ = SAE.from_pretrained(
+                    release=self.sae_release,
+                    sae_id=sae_id,
+                    device=self.device,
+                )
+                
+                self.saes[layer] = sae
+                print(f"SAE loaded: {sae.cfg.d_sae} features")
+                return sae
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    print(f"  SAE load attempt {attempt + 1} failed: {e}")
+                    print(f"  Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+        
+        raise RuntimeError(
+            f"Failed to load SAE for layer {layer} after {max_retries} attempts. "
+            f"SAE ID: {sae_id}, Release: {self.sae_release}. "
+            f"Last error: {last_error}"
         )
-        
-        self.saes[layer] = sae
-        print(f"SAE loaded: {sae.cfg.d_sae} features")
-        return sae
     
     def get_hidden_states(self, text: str, layer: int):
         """Get hidden states at a specific layer.

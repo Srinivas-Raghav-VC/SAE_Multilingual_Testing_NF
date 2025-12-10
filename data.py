@@ -28,14 +28,29 @@ from config import LANGUAGES, SEED, EVAL_PROMPTS
 
 @dataclass
 class DataSplit:
-    """Container for properly split data."""
-    train: Dict[str, List[str]]           # For feature discovery
-    test: Dict[str, List[str]]            # For feature validation
+    """Container for properly split data with strict separation guarantees.
+
+    Critical for research validity:
+    - train: Used ONLY for computing steering vectors / feature statistics
+    - test: Used ONLY for evaluating feature metrics (held-out validation)
+    - steering_prompts: Used ONLY for steering evaluation (must not overlap with train)
+    - qa_eval: Completely separate QA datasets (MLQA, IndicQA)
+    """
+    train: Dict[str, List[str]]           # For feature discovery / steering vector computation
+    test: Dict[str, List[str]]            # For feature validation (held-out)
     steering_prompts: List[str]           # For steering evaluation
     qa_eval: Optional[Dict[str, Any]] = None  # For QA evaluation
-    
-    def verify_no_leakage(self) -> bool:
-        """Verify train and test don't overlap."""
+    data_provenance: Optional[Dict[str, str]] = None  # Track data sources
+
+    def verify_no_leakage(self) -> Tuple[bool, Dict[str, int]]:
+        """Verify train and test don't overlap.
+
+        Returns:
+            Tuple of (passed: bool, overlap_counts: Dict[str, int])
+        """
+        overlap_counts = {}
+        all_clean = True
+
         for lang in self.train.keys():
             if lang not in self.test:
                 continue
@@ -43,9 +58,50 @@ class DataSplit:
             test_set = set(self.test[lang])
             overlap = train_set & test_set
             if overlap:
+                overlap_counts[lang] = len(overlap)
                 print(f"WARNING: {len(overlap)} sentences overlap in {lang}!")
-                return False
-        return True
+                all_clean = False
+
+        # Also check steering prompts against train
+        train_all = set()
+        for sents in self.train.values():
+            train_all.update(sents)
+
+        steering_overlap = set(self.steering_prompts) & train_all
+        if steering_overlap:
+            overlap_counts["steering_vs_train"] = len(steering_overlap)
+            print(f"WARNING: {len(steering_overlap)} steering prompts overlap with training data!")
+            all_clean = False
+
+        return all_clean, overlap_counts
+
+    def get_fingerprint(self) -> str:
+        """Generate a hash fingerprint of the data split for reproducibility."""
+        import hashlib
+
+        content = []
+        for lang in sorted(self.train.keys()):
+            content.append(f"train_{lang}_{len(self.train[lang])}")
+            if self.train[lang]:
+                content.append(self.train[lang][0][:50])
+        for lang in sorted(self.test.keys()):
+            content.append(f"test_{lang}_{len(self.test[lang])}")
+        content.append(f"steering_{len(self.steering_prompts)}")
+
+        return hashlib.md5("".join(content).encode()).hexdigest()[:12]
+
+    def summary(self) -> str:
+        """Generate a summary string for logging."""
+        lines = ["DataSplit Summary:"]
+        lines.append(f"  Fingerprint: {self.get_fingerprint()}")
+        lines.append(f"  Train languages: {list(self.train.keys())}")
+        lines.append(f"  Test languages: {list(self.test.keys())}")
+        for lang in self.train:
+            lines.append(f"    {lang}: {len(self.train.get(lang, []))} train, {len(self.test.get(lang, []))} test")
+        lines.append(f"  Steering prompts: {len(self.steering_prompts)}")
+        if self.qa_eval:
+            lines.append(f"  QA datasets: {list(self.qa_eval.keys())}")
+        return "\n".join(lines)
 
 
 @dataclass  
@@ -491,10 +547,15 @@ def load_research_data(
     
     # ----- VERIFY -----
     print("\n5. Verifying data integrity...")
-    if data_split.verify_no_leakage():
+    no_leakage, overlap_counts = data_split.verify_no_leakage()
+    if no_leakage:
         print("  ✓ No data leakage detected")
     else:
         print("  ✗ WARNING: Potential data leakage!")
+        for key, count in overlap_counts.items():
+            print(f"     - {key}: {count} overlapping items")
+
+    print(f"\n  Data fingerprint: {data_split.get_fingerprint()}")
     
     # ----- SUMMARY -----
     print("\n" + "=" * 60)
