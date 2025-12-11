@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import gc
 import torch
 import json
 from tqdm import tqdm
@@ -287,6 +288,11 @@ def main():
     print(f"Baseline Hindi success rate: {baseline_results['success_rate']:.1%}")
 
     for layer in layers_to_test:
+        # Clear CUDA memory between layers to prevent OOM
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+
         print(f"\n{'=' * 60}")
         print(f"Layer {layer} - Steering Experiments")
         print("=" * 60)

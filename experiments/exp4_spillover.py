@@ -60,15 +60,23 @@ def detect_script(text: str) -> str:
     """Detect primary script in text."""
     if not text:
         return "unknown"
-    
+
     script_counts = {}
-    for script_name, (start, end) in SCRIPT_RANGES.items():
-        count = sum(1 for c in text if start <= ord(c) <= end)
+    for script_name, ranges in SCRIPT_RANGES.items():
+        # SCRIPT_RANGES now contains lists of (start, end) tuples
+        # to support multi-range scripts like Devanagari Extended
+        count = 0
+        for char in text:
+            code = ord(char)
+            for start, end in ranges:
+                if start <= code <= end:
+                    count += 1
+                    break  # Don't double-count
         script_counts[script_name] = count
-    
+
     if not script_counts or max(script_counts.values()) == 0:
         return "unknown"
-    
+
     return max(script_counts, key=script_counts.get)
 
 
