@@ -56,25 +56,34 @@ from stats import (
 def get_activation_diff_features(model, texts_en, texts_hi, layer, top_k):
     """Select features by activation difference between languages."""
     sae = model.load_sae(layer)
-    
+
+    # Limit to 200 texts to avoid OOM (same as monolinguality method)
+    sample_size = 200
+
     # Mean activation for English
     en_acts = []
-    for text in texts_en:
+    for text in tqdm(texts_en[:sample_size], desc="EN activations", leave=False):
         acts = model.get_sae_activations(text, layer)
-        en_acts.append(acts.mean(dim=0))
+        en_acts.append(acts.mean(dim=0).detach())
     en_mean = torch.stack(en_acts).mean(dim=0)
-    
+    del en_acts  # Free memory
+
     # Mean activation for Hindi
     hi_acts = []
-    for text in texts_hi:
+    for text in tqdm(texts_hi[:sample_size], desc="HI activations", leave=False):
         acts = model.get_sae_activations(text, layer)
-        hi_acts.append(acts.mean(dim=0))
+        hi_acts.append(acts.mean(dim=0).detach())
     hi_mean = torch.stack(hi_acts).mean(dim=0)
-    
+    del hi_acts  # Free memory
+
     # Difference: positive = more active for Hindi
     diff = hi_mean - en_mean
     _, top_ids = diff.topk(top_k)
-    
+
+    # Clear cache after heavy computation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return top_ids.tolist()
 
 
@@ -115,22 +124,30 @@ def construct_sae_steering_vector(model, layer, feature_ids):
 
 def construct_dense_steering_vector(model, texts_en, texts_hi, layer):
     """Build dense steering vector (mean difference in hidden space)."""
+    sample_size = 100
+
     # Mean hidden state for English
     en_hidden = []
-    for text in texts_en[:100]:
+    for text in tqdm(texts_en[:sample_size], desc="EN hidden", leave=False):
         h = model.get_hidden_states(text, layer)
-        en_hidden.append(h.mean(dim=0))
+        en_hidden.append(h.mean(dim=0).detach())
     en_mean = torch.stack(en_hidden).mean(dim=0)
-    
+    del en_hidden
+
     # Mean hidden state for Hindi
     hi_hidden = []
-    for text in texts_hi[:100]:
+    for text in tqdm(texts_hi[:sample_size], desc="HI hidden", leave=False):
         h = model.get_hidden_states(text, layer)
-        hi_hidden.append(h.mean(dim=0))
+        hi_hidden.append(h.mean(dim=0).detach())
     hi_mean = torch.stack(hi_hidden).mean(dim=0)
-    
+    del hi_hidden
+
     vector = hi_mean - en_mean
     vector = vector / vector.norm() * (vector.shape[0] ** 0.5)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return vector
 
 

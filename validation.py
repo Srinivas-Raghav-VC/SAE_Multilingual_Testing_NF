@@ -217,7 +217,7 @@ def validate_experiment_setup(verbose: bool = True) -> Tuple[bool, List[Validati
             for w in config_warnings:
                 print(f"   {w}")
         else:
-            print("   ✓ Configuration OK")
+            print("   [OK] Configuration OK")
     
     # Check for critical errors
     errors = [w for w in all_warnings if w.severity == "error"]
@@ -229,17 +229,17 @@ def validate_experiment_setup(verbose: bool = True) -> Tuple[bool, List[Validati
         print("=" * 60)
         
         if errors:
-            print("\n❌ CRITICAL ERRORS (must fix before running experiments):")
+            print("\n[X] CRITICAL ERRORS (must fix before running experiments):")
             for e in errors:
-                print(f"   • {e.message}")
-        
+                print(f"   - {e.message}")
+
         if warnings_only:
-            print("\n⚠️  WARNINGS (recommended to address):")
+            print("\n[!] WARNINGS (recommended to address):")
             for w in warnings_only:
-                print(f"   • {w.message}")
-        
+                print(f"   - {w.message}")
+
         if not errors and not warnings_only:
-            print("\n✓ All validation checks passed!")
+            print("\n[OK] All validation checks passed!")
     
     all_passed = len(errors) == 0
     return all_passed, all_warnings

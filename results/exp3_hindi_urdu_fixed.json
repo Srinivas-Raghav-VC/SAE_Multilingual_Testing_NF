@@ -1,0 +1,181 @@
+{
+  "layers": {
+    "5": {
+      "feature_counts": {
+        "hindi": 8509,
+        "urdu": 8536,
+        "english": 8406
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9863652254981937,
+        "hindi_english": 0.9666317870015114,
+        "urdu_english": 0.9624695934205953
+      },
+      "script_semantic": {
+        "semantic": 8424,
+        "hindi_script": 60,
+        "urdu_script": 70,
+        "semantic_ratio": 0.9817037641300548,
+        "script_ratio": 0.015149749446451463
+      }
+    },
+    "8": {
+      "feature_counts": {
+        "hindi": 7058,
+        "urdu": 7056,
+        "english": 7115
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9825818232897879,
+        "hindi_english": 0.9436368623148657,
+        "urdu_english": 0.9369874248223072
+      },
+      "script_semantic": {
+        "semantic": 6940,
+        "hindi_script": 68,
+        "urdu_script": 68,
+        "semantic_ratio": 0.9748560191038067,
+        "script_ratio": 0.019103806714426182
+      }
+    },
+    "10": {
+      "feature_counts": {
+        "hindi": 5035,
+        "urdu": 5017,
+        "english": 5150
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9390432098765432,
+        "hindi_english": 0.8585766423357665,
+        "urdu_english": 0.8365245664739884
+      },
+      "script_semantic": {
+        "semantic": 4818,
+        "hindi_script": 174,
+        "urdu_script": 156,
+        "semantic_ratio": 0.9293981481481481,
+        "script_ratio": 0.06365740740740741
+      }
+    },
+    "13": {
+      "feature_counts": {
+        "hindi": 6758,
+        "urdu": 6740,
+        "english": 6784
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9785986514218704,
+        "hindi_english": 0.9367848970251716,
+        "urdu_english": 0.9306209850107067
+      },
+      "script_semantic": {
+        "semantic": 6641,
+        "hindi_script": 101,
+        "urdu_script": 86,
+        "semantic_ratio": 0.9734681911462915,
+        "script_ratio": 0.027411316329522133
+      }
+    },
+    "16": {
+      "feature_counts": {
+        "hindi": 8291,
+        "urdu": 8292,
+        "english": 8338
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9907563025210084,
+        "hindi_english": 0.9614295824486907,
+        "urdu_english": 0.9601603017444602
+      },
+      "script_semantic": {
+        "semantic": 8232,
+        "hindi_script": 44,
+        "urdu_script": 41,
+        "semantic_ratio": 0.9882352941176471,
+        "script_ratio": 0.01020408163265306
+      }
+    },
+    "20": {
+      "feature_counts": {
+        "hindi": 7574,
+        "urdu": 7581,
+        "english": 7733
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9872803566745345,
+        "hindi_english": 0.9378402329408786,
+        "urdu_english": 0.9343185550082101
+      },
+      "script_semantic": {
+        "semantic": 7490,
+        "hindi_script": 64,
+        "urdu_script": 57,
+        "semantic_ratio": 0.982166273275636,
+        "script_ratio": 0.015866771570941515
+      }
+    },
+    "24": {
+      "feature_counts": {
+        "hindi": 6345,
+        "urdu": 6481,
+        "english": 6511
+      },
+      "jaccard_overlaps": {
+        "hindi_urdu": 0.9258258258258258,
+        "hindi_english": 0.8426257703884191,
+        "urdu_english": 0.825488267528453
+      },
+      "script_semantic": {
+        "semantic": 6007,
+        "hindi_script": 202,
+        "urdu_script": 289,
+        "semantic_ratio": 0.901951951951952,
+        "script_ratio": 0.07372372372372372
+      }
+    }
+  },
+  "hypothesis_tests": {
+    "h4a_semantic_overlap": true,
+    "h4b_script_small": true,
+    "h4c_urdu_closer": true,
+    "overall": true
+  },
+  "sensitivity_analysis": {
+    "layer": 13,
+    "thresholds": {
+      "0.01": {
+        "hindi_urdu": 0.9785986514218704,
+        "hindi_english": 0.9367848970251716,
+        "urdu_english": 0.9306209850107067,
+        "n_hindi": 6758,
+        "n_urdu": 6740,
+        "n_english": 6784
+      },
+      "0.02": {
+        "hindi_urdu": 0.6249000266595575,
+        "hindi_english": 0.5416351821066949,
+        "urdu_english": 0.342069588793493,
+        "n_hindi": 3693,
+        "n_urdu": 2402,
+        "n_english": 6508
+      },
+      "0.05": {
+        "hindi_urdu": 0.6310160427807486,
+        "hindi_english": 0.16891891891891891,
+        "urdu_english": 0.1355421686746988,
+        "n_hindi": 137,
+        "n_urdu": 168,
+        "n_english": 209
+      },
+      "0.1": {
+        "hindi_urdu": 0.6756756756756757,
+        "hindi_english": 0.3125,
+        "urdu_english": 0.24390243902439024,
+        "n_hindi": 53,
+        "n_urdu": 71,
+        "n_english": 31
+      }
+    },
+    "robust_across_thresholds": true
+  }
+}

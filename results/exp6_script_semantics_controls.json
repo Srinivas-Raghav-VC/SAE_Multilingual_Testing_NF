@@ -1,0 +1,44 @@
+{
+  "5": {
+    "hi_script_only": 187,
+    "hi_semantic": 8401,
+    "family_semantic": 8435,
+    "noise_script_only": 203
+  },
+  "8": {
+    "hi_script_only": 181,
+    "hi_semantic": 6871,
+    "family_semantic": 6953,
+    "noise_script_only": 175
+  },
+  "10": {
+    "hi_script_only": 348,
+    "hi_semantic": 4612,
+    "family_semantic": 4782,
+    "noise_script_only": 297
+  },
+  "13": {
+    "hi_script_only": 197,
+    "hi_semantic": 6567,
+    "family_semantic": 6607,
+    "noise_script_only": 173
+  },
+  "16": {
+    "hi_script_only": 94,
+    "hi_semantic": 8193,
+    "family_semantic": 8218,
+    "noise_script_only": 90
+  },
+  "20": {
+    "hi_script_only": 71,
+    "hi_semantic": 7442,
+    "family_semantic": 7481,
+    "noise_script_only": 51
+  },
+  "24": {
+    "hi_script_only": 241,
+    "hi_semantic": 5937,
+    "family_semantic": 6086,
+    "noise_script_only": 93
+  }
+}

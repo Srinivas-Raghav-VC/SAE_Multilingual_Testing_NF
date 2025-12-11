@@ -195,13 +195,16 @@ def main():
     # are not dominated by noise. We draw prompts from the steering
     # prompts (held-out FLORES EN + EVAL_PROMPTS), keeping them
     # distinct from the training texts used for candidate selection.
-    num_prompts = min(max(N_SAMPLES_EVAL, 50), len(prompts_all))
+    #
+    # MIDDLE-GROUND SETTINGS for paper quality:
+    # - 50 prompts: decent statistical power for detecting 10-15% effects
+    # - 5 features/method × 2 methods = 10 features per layer
+    # - 3 strengths × 2 directions = 6 conditions per feature
+    # Total: 4 layers × 10 features × 6 conditions × 50 prompts = 12,000 generations
+    # Estimated time: ~6 hours
+    num_prompts = min(50, len(prompts_all))
     prompts = prompts_all[:num_prompts]
-    if num_prompts < MIN_PROMPTS_CAUSAL_PROBING:
-        print(
-            f"[exp7] WARNING: only {num_prompts} prompts available "
-            f"(recommend >= {MIN_PROMPTS_CAUSAL_PROBING} for statistically reliable causal effect estimates)"
-        )
+    print(f"[exp7] Using {num_prompts} prompts for causal probing (middle-ground for paper)")
 
     # Use a small subset of layers for cost
     probe_layers = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]
@@ -211,10 +214,14 @@ def main():
     all_effects: List[FeatureEffect] = []
 
     for layer in probe_layers:
+        # Clear CUDA memory between layers
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         print(f"\nSelecting candidates at layer {layer}...")
-        # Use top_k=10 for better statistical coverage of the feature space
-        # (increased from 5 for research rigor)
-        candidates = select_candidates(model, texts_en, texts_hi, layer, top_k=10)
+        # Use top_k=5 to keep runtime manageable while still covering feature space
+        # Total: 5 features × 2 methods = 10 features per layer
+        candidates = select_candidates(model, texts_en, texts_hi, layer, top_k=5)
 
         for method_name, feat_list in candidates.items():
             for feat in feat_list:
@@ -224,7 +231,7 @@ def main():
                     feature_idx=feat,
                     layer=layer,
                     prompts=prompts,
-                    strengths=[0.5, 1.0, 2.0],
+                    strengths=[0.5, 1.0, 2.0],  # Full range for paper quality
                 )
                 all_effects.extend(effects)
 

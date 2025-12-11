@@ -161,15 +161,17 @@ def compute_steering_vector(model, texts_target, texts_source, layer):
     target_acts = []
     for text in texts_target[:100]:
         acts = model.get_sae_activations(text, layer)
-        target_acts.append(acts.mean(dim=0))
+        target_acts.append(acts.mean(dim=0).detach())
     target_mean = torch.stack(target_acts).mean(dim=0)
+    del target_acts
 
     # Get mean activations for source language
     source_acts = []
     for text in texts_source[:100]:
         acts = model.get_sae_activations(text, layer)
-        source_acts.append(acts.mean(dim=0))
+        source_acts.append(acts.mean(dim=0).detach())
     source_mean = torch.stack(source_acts).mean(dim=0)
+    del source_acts
 
     # Difference: positive values correspond to features more active for target.
     diff = target_mean - source_mean
@@ -199,6 +201,10 @@ def compute_steering_vector(model, texts_target, texts_source, layer):
     # Normalise to have comparable scale to other steering vectors.
     if vec.norm() > 0:
         vec = vec / vec.norm() * (sae.cfg.d_in ** 0.5)
+
+    # Clear CUDA cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return vec
 
