@@ -1,143 +1,115 @@
-# SAE Multilingual Steering Experiments
+# SAE Multilingual Steering (Gemma + Gemma Scope SAEs)
 
-Testing sparse autoencoder (SAE) features for English→Indic language steering on Gemma 2 2B.
+Research codebase for **measuring and steering language behavior** in Gemma models using **Sparse Autoencoders (SAEs)**.
 
-## Critical Updates (December 2025)
+## What This Repo Does
 
-### 1. Dataset Migration (REQUIRED)
-- **Old:** `facebook/flores` (DEPRECATED)
-- **New:** `openlanguagedata/flores_plus` (FLORES+ v4.2)
-- **Requirement:** HF authentication (gated dataset)
-
-### 2. Monolinguality Threshold Fix
-- **Wrong:** 0.7 (inverts meaning!)
-- **Correct:** **3.0** per arXiv:2505.05111
-
-### 3. LLM-as-Judge Evaluation (Gemini - FREE!)
-- Script detection alone can't distinguish gibberish from real Hindi
-- **Using Gemini 2.5 Flash** (FREE API) for semantic quality evaluation
-- Reference: MM-Eval (arXiv:2410.17578)
-
-### 4. Literature Validation (50+ Papers!)
-Your "Messy Middle" hypothesis is **VERY STRONGLY VALIDATED**:
-- **7+ papers** confirm mid-layer concept space
-- **6+ papers** document steering-induced degradation (repetition after 5-10 interventions)
-- **7+ papers** validate Hindi-Urdu script separation
-
-See `HYPOTHESIS_EVALUATION.md` for complete analysis.
-
----
+- Loads Gemma 2 (2B; optional 9B sanity check) and Gemma Scope residual-stream SAEs.
+- Runs a **core, paper-oriented** set of experiments:
+  - Language-selective feature discovery (monolinguality detectors).
+  - Cross-lingual overlap (Hindi–Urdu vs Hindi–English Jaccard).
+  - Steering sweeps (layer × method × language × strength).
+  - Spillover + **EN→DE control**.
+  - QA degradation under steering (MLQA + Indic QA).
+  - Causal checks (occlusion attribution; group ablations).
+- Writes results to `results/*.json`, and figures to `results/figures/` via `plots.py`.
 
 ## Setup
 
 ```bash
-# 1. Required: HuggingFace authentication
-export HF_TOKEN=your_token_here
-# Or: huggingface-cli login
+# Hugging Face (optional but recommended)
+export HF_TOKEN=hf_...
 
-# 2. Required: Gemini API key (FREE!)
-#    Get yours at: https://aistudio.google.com/apikey
-export GOOGLE_API_KEY=your_key_here
+# Gemini judge (optional; used when enabled)
+export GEMINI_API_KEY=...
+# or: export GOOGLE_API_KEY=...
 
-# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
-### Flash Attention (Optional)
-
-**A100:** Use default SDPA (no setup needed)
-
-**H100 (Flash Attention 3):**
-```bash
-# Set BEFORE importing torch
-export FLASH_ATTENTION_DISABLE_BACKWARD=TRUE
-export FLASH_ATTENTION_DISABLE_HDIM128=FALSE  # Keep for Gemma
-# ... see config.py for full list
-
-git clone https://github.com/Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-MAX_JOBS=32 python setup.py install
-```
-
----
-
-## Run Experiments
+## Run
 
 ```bash
-# Test data loading first
-python data.py
+# Sanity/rigor checks
+python run.py --validate
 
-# Feature discovery (H1, H3)
-python run.py exp1
+# Core suite (recommended)
+python run.py --all
 
-# Steering comparison (H2)
-python run.py exp2
+# Scaling runs on Gemma-2-9B (+ 9B SAEs)
+# Writes separate *_9b.json files under results/
+python run.py --all --use_9b
 
-# Hindi-Urdu overlap (H4)
-python run.py exp3
-
-# All experiments
-python run.py all
+# Or run specific experiments
+python run.py --exp1   # feature discovery
+python run.py --exp3   # Hindi–Urdu overlap
+python run.py --exp9   # main steering sweep (can be expensive)
 ```
 
----
+### Smart runner (waits for GPU)
 
-## Key Parameters
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Model | google/gemma-2-2b | 26 layers, 2304 hidden |
-| SAE Release | gemma-scope-2b-pt-res-canonical | Official Gemma Scope |
-| SAE Width | 16k | L0 ≈ 100 |
-| Target Layers | 5, 8, 10, 13, 16, 20, 24 | Early/mid/late |
-| Monolinguality Threshold | **3.0** | CORRECTED from 0.7 |
-| Languages | EN, HI, BN, TA, TE, UR | FLORES+ codes |
-| LLM Judge | Gemini 2.5 Flash | FREE API! |
-
----
-
-## Expected Results (Literature-Backed)
-
-| Hypothesis | Expected | Falsification | Papers |
-|------------|----------|---------------|--------|
-| H1: Hindi features | 15-50 per layer | <10 with M>3.0 | arXiv:2410.02003, 2412.15678 |
-| H3: Mid-layer peak | Layer 12-14 | Peak outside 8-18 | 7+ papers |
-| H2: Method comparison | Both beat random | Neither beats random | arXiv:2408.15678 |
-| H4: Hindi-Urdu overlap | 70% semantic, 20% script | <50% Jaccard | 7+ papers |
-
----
-
-## Troubleshooting
-
-### Dataset Error
 ```bash
-export HF_TOKEN=hf_your_token
+python smart_run.py
 ```
 
-### CUDA OOM
-Reduce `N_SAMPLES_DISCOVERY` in config.py
+## Gemini rate limits / cost control
 
-### LLM Judge Not Working
+Exp9 can generate many judge calls. To subsample:
 ```bash
-# Get free Gemini API key from:
-# https://aistudio.google.com/apikey
-export GOOGLE_API_KEY=AIza...
+export GEMINI_SAMPLE_RATE=0.2   # judge ~1/5 prompts
+export GEMINI_MAX_RPM=60        # throttle (per-process)
+export GEMINI_MAX_RETRIES=5     # retry/backoff on 429s
 ```
 
----
+## Steering schedules (optional)
 
-## Key References
+Steering is implemented as activation addition, with optional schedules:
+```bash
+export STEERING_SCHEDULE=constant        # default
+export STEERING_SCHEDULE=generation_only # CAA-style (after the prompt)
+export STEERING_SCHEDULE=exp_decay
+export STEERING_DECAY=0.9
+```
 
-### Tier 1: Must Read (Validates Your Work)
-1. **arXiv:2410.02003** - Disentangling Monolingual/Multilingual SAE Features
-2. **arXiv:2502.15603** - Do Multilingual LLMs Think In English?
-3. **arXiv:2401.01339** - Steering Makes Models Worse
-4. **House United** - Hindi-Urdu Translation (irshadbhat.github.io)
-5. **arXiv:2412.15678** - 90% Monolingual Fidelity with SAEs
+## Better language ID for spillover controls (optional, recommended)
 
-### Tier 2: Supporting Evidence
-6. **arXiv:2505.05111** - Language-Specific Features via SAEs
-7. **arXiv:2408.05147** - Gemma Scope
-8. **arXiv:2410.17578** - MM-Eval (LLM Judge Evaluation)
-9. **arXiv:2403.07292** - Hindi-Urdu Distinct Subspaces
-10. **arXiv:2410.23456** - Degradation after 5-10 Interventions
+Exp4 spillover includes Latin-script controls (EN/DE/ES/FR) and Arabic-script
+controls (AR vs UR). Script-based detection alone is insufficient for these.
+
+We support an optional fastText-based LID backend via `fast-langdetect`:
+
+```bash
+pip install fast-langdetect
+python scripts/download_fasttext_lid.py          # downloads lid.176.ftz to models/
+
+export LID_BACKEND=fasttext
+export FASTTEXT_LID_MODEL_PATH=models/lid.176.ftz
+```
+
+If you cannot install `fast-langdetect`, you can still run with the default
+regex heuristics (less reliable on short Latin-script outputs).
+
+## Experiments (Core vs Archived)
+
+Core experiments in `experiments/` and exposed via `run.py`:
+- Exp1 `exp1_feature_discovery.py`
+- Exp3 `exp3_hindi_urdu_fixed.py`
+- Exp4 `exp4_spillover.py` (includes EN→DE control)
+- Exp5 `exp5_hierarchical.py`
+- Exp6 `exp6_script_semantics_controls.py`
+- Exp8 `exp8_scaling_9b_low_resource.py` (sanity check)
+- Exp9 `exp9_layer_sweep_steering.py`
+- Exp10 `exp10_attribution_occlusion.py`
+- Exp11 `exp11_judge_calibration.py`
+- Exp12 `exp12_qa_degradation.py`
+- Exp13 `exp13_script_semantic_ablation.py`
+- Exp14 `exp14_language_agnostic_space.py`
+
+Archived (sanity/exploratory) lives under `archive/experiments_sanity/`.
+
+## Dataset notes (rigor)
+
+- FLORES: `load_flores()` tries `facebook/flores` and falls back to `openlanguagedata/flores_plus`.
+  - In `load_research_data()`, FLORES `dev` is used as train-like data and `devtest` as held-out validation.
+- MLQA: if `facebook/mlqa` fails (Hub scripts disabled), we fall back to the parquet mirror `AkshitaS/facebook_mlqa_plus`.
+- Indic QA: attempts `ai4bharat/IndicQA`; if scripts are disabled, falls back to streaming `ai4bharat/Indic-Rag-Suite` per-language.

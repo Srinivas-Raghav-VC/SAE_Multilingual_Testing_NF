@@ -3,20 +3,24 @@
 Integrates:
 1. Script detection with dominance margin (rejects code-mixed text)
 2. Semantic similarity via LaBSE
-3. LLM-as-Judge with CALIBRATION (Lee et al., 2025 - arXiv:2511.21140)
+3. LLM-as-Judge with calibration (bias correction)
 4. CORRECT Jaccard overlap (always ≤ 1.0)
 5. Repetition/degradation metrics
 6. Pareto frontier analysis
 
-Key insight from Lee et al. (2025):
-- Raw LLM judge scores are BIASED
-- θ̂ = (p̂ + q₀ - 1) / (q₀ + q₁ - 1) corrects for bias
-- Need calibration set with ground-truth labels
+Key insight:
+- Raw LLM judge scores can be biased.
+- We correct observed rates using a sensitivity/specificity calibration
+  estimated from a labeled calibration set.
 """
 
 import json
 import os
 import re
+import hashlib
+import random
+import time
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass, field
 from math import sqrt
@@ -34,7 +38,16 @@ from config import (
     SEMANTIC_MODEL_NAME,
     SEMANTIC_SIM_THRESHOLD,
     GOOGLE_API_KEY,
+    MIN_JUDGE_CALIB_PER_CLASS,
 )
+
+import unicodedata
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+LID_CONFIDENCE_THRESHOLD = 0.6  # Minimum confidence for reliable language detection
 
 
 ###############################################################################
@@ -43,18 +56,107 @@ from config import (
 
 _SEMANTIC_MODEL_CACHE: Dict[str, Any] = {}
 _TRUNCATION_WARNED: bool = False
+# Track truncation frequency for reporting/debugging.
+_SEMANTIC_CALLS: int = 0
+_SEMANTIC_TRUNCATED: int = 0
+
+
+###############################################################################
+# LLM JUDGE (Gemini) + RATE LIMITING/CACHE
+###############################################################################
+
+_LLM_JUDGE_CACHE: Dict[str, Dict] = {}
+_LLM_JUDGE_CACHE_PATH = Path("results/llm_judge_cache.jsonl")
+_LLM_JUDGE_CACHE_LOADED: bool = False
+
+_LAST_JUDGE_TS: float = 0.0
+_JUDGE_WINDOW_START: float = 0.0
+_JUDGE_CALLS_IN_WINDOW: int = 0
+
+
+def _load_llm_judge_cache() -> None:
+    """Load on-disk judge cache once per process."""
+    global _LLM_JUDGE_CACHE_LOADED
+    if _LLM_JUDGE_CACHE_LOADED:
+        return
+    _LLM_JUDGE_CACHE_LOADED = True
+    if not _LLM_JUDGE_CACHE_PATH.exists():
+        return
+    try:
+        with _LLM_JUDGE_CACHE_PATH.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                key = obj.get("key")
+                resp = obj.get("response")
+                if key and isinstance(resp, dict):
+                    _LLM_JUDGE_CACHE[key] = resp
+    except Exception as e:
+        print(f"[eval] Warning: could not load LLM judge cache: {e}")
+
+
+def _judge_cache_key(prompt: str, output: str, lang_code: str) -> str:
+    h = hashlib.sha256()
+    h.update(lang_code.encode("utf-8"))
+    h.update(b"\n---\n")
+    h.update(prompt.encode("utf-8"))
+    h.update(b"\n---\n")
+    h.update(output.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _respect_gemini_rpm(max_rpm: int) -> None:
+    """Simple per-process RPM throttle."""
+    global _LAST_JUDGE_TS, _JUDGE_WINDOW_START, _JUDGE_CALLS_IN_WINDOW
+    now = time.time()
+    if _JUDGE_WINDOW_START == 0.0 or (now - _JUDGE_WINDOW_START) >= 60.0:
+        _JUDGE_WINDOW_START = now
+        _JUDGE_CALLS_IN_WINDOW = 0
+
+    # Smooth spacing between calls.
+    if max_rpm > 0:
+        min_interval = 60.0 / float(max_rpm)
+        dt = now - _LAST_JUDGE_TS
+        if dt < min_interval:
+            time.sleep(min_interval - dt)
+
+    _JUDGE_CALLS_IN_WINDOW += 1
+    if max_rpm > 0 and _JUDGE_CALLS_IN_WINDOW > max_rpm:
+        sleep_for = 60.0 - (now - _JUDGE_WINDOW_START) + 0.1
+        print(f"[eval] Gemini RPM limit reached ({max_rpm}/min); sleeping {sleep_for:.1f}s.")
+        time.sleep(max(sleep_for, 0.0))
+        _JUDGE_WINDOW_START = time.time()
+        _JUDGE_CALLS_IN_WINDOW = 1
+
+    _LAST_JUDGE_TS = time.time()
 
 
 def get_semantic_model(model_name: str = SEMANTIC_MODEL_NAME):
-    """Lazy-load and cache a SentenceTransformer model."""
-    if model_name in _SEMANTIC_MODEL_CACHE:
-        return _SEMANTIC_MODEL_CACHE[model_name]
+    """Lazy-load and cache a SentenceTransformer model.
+
+    Defaulting this to GPU can cause OOM in shared-GPU setups because the main
+    LLM already occupies most VRAM. We therefore default to CPU and allow
+    opting into CUDA explicitly via ``SEMANTIC_DEVICE=cuda``.
+    """
+    device = os.environ.get("SEMANTIC_DEVICE", "cpu").strip().lower() or "cpu"
+    cache_key = f"{model_name}::{device}"
+    if cache_key in _SEMANTIC_MODEL_CACHE:
+        return _SEMANTIC_MODEL_CACHE[cache_key]
     
     try:
         from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer(model_name)
-        _SEMANTIC_MODEL_CACHE[model_name] = model
-        print(f"[eval] Loaded semantic model: {model_name}")
+        try:
+            model = SentenceTransformer(model_name, device=device)
+        except TypeError:
+            model = SentenceTransformer(model_name)
+            try:
+                model = model.to(device)
+            except Exception:
+                pass
+        _SEMANTIC_MODEL_CACHE[cache_key] = model
+        print(f"[eval] Loaded semantic model: {model_name} (device={device})")
         return model
     except Exception as e:
         print(f"[eval] Warning: could not load semantic model: {e}")
@@ -73,6 +175,8 @@ def _truncate_for_semantic_model(text: str, max_tokens: int = 512) -> str:
     tokens = text.split()
     if len(tokens) <= max_tokens:
         return text
+    global _SEMANTIC_TRUNCATED
+    _SEMANTIC_TRUNCATED += 1
     # Warn once per process to avoid log spam.
     if not _TRUNCATION_WARNED:
         print(f"[eval] Warning: truncating text from {len(tokens)} to {max_tokens} tokens for semantic similarity.")
@@ -85,6 +189,8 @@ def semantic_similarity(text_a: str, text_b: str, model_name: str = SEMANTIC_MOD
     
     Returns -1.0 if model unavailable.
     """
+    global _SEMANTIC_CALLS
+    _SEMANTIC_CALLS += 1
     model = get_semantic_model(model_name)
     if model is None:
         return -1.0
@@ -93,6 +199,62 @@ def semantic_similarity(text_a: str, text_b: str, model_name: str = SEMANTIC_MOD
     text_b = _truncate_for_semantic_model(text_b)
     embs = model.encode([text_a, text_b], convert_to_numpy=True, normalize_embeddings=True)
     return float(np.dot(embs[0], embs[1]))
+
+
+def get_semantic_truncation_stats() -> Dict[str, int]:
+    """Return process-level truncation counters for LaBSE calls."""
+    return {"calls": _SEMANTIC_CALLS, "truncated_texts": _SEMANTIC_TRUNCATED}
+
+###############################################################################
+# QA METRICS (Exact Match / F1)
+###############################################################################
+
+def normalize_qa_text(text: str) -> str:
+    """Language-agnostic QA normalization.
+
+    We avoid English-specific heuristics (e.g., article removal) because this
+    project evaluates multilingual QA. We:
+      - lowercase,
+      - strip Unicode punctuation,
+      - normalize whitespace.
+    """
+    if not text:
+        return ""
+    text = text.lower()
+    text = "".join(ch for ch in text if not unicodedata.category(ch).startswith("P"))
+    return " ".join(text.split())
+
+
+def qa_exact_match(prediction: str, references: List[str]) -> float:
+    """Exact match, max over references."""
+    if not references:
+        return 0.0
+    pred = normalize_qa_text(prediction)
+    return float(any(pred == normalize_qa_text(r) for r in references))
+
+
+def qa_f1(prediction: str, references: List[str]) -> float:
+    """Token F1, max over references."""
+    if not references:
+        return 0.0
+
+    def _f1_single(pred: str, ref: str) -> float:
+        pred_toks = normalize_qa_text(pred).split()
+        ref_toks = normalize_qa_text(ref).split()
+        if not pred_toks and not ref_toks:
+            return 1.0
+        if not pred_toks or not ref_toks:
+            return 0.0
+
+        common = Counter(pred_toks) & Counter(ref_toks)
+        num_same = sum(common.values())
+        if num_same == 0:
+            return 0.0
+        precision = num_same / len(pred_toks)
+        recall = num_same / len(ref_toks)
+        return 2 * precision * recall / (precision + recall)
+
+    return float(max(_f1_single(prediction, r) for r in references))
 
 
 # =============================================================================
@@ -122,6 +284,10 @@ class SteeringEvalResult:
     semantic_similarity: float = -1.0
     semantics_ok: bool = False
     reference: str = ""
+
+    # QA metrics (only set when a gold reference answer is provided)
+    qa_exact_match: Optional[float] = None  # 0/1
+    qa_f1: Optional[float] = None           # 0..1
     
     # LLM-as-Judge (raw scores)
     llm_language_score: float = 0.0      # 1-5
@@ -135,7 +301,7 @@ class SteeringEvalResult:
 
 @dataclass
 class CalibratedJudgeResult:
-    """Result from calibrated LLM-as-Judge evaluation (Lee et al., 2025).
+    """Result from calibrated LLM-as-Judge evaluation.
     
     Implements bias correction: θ̂ = (p̂ + q₀ - 1) / (q₀ + q₁ - 1)
     """
@@ -230,6 +396,9 @@ class AggregateResults:
     per_prompt_semantic_sim: Optional[List[float]] = None
     per_prompt_degraded: Optional[List[int]] = None  # 0/1 per prompt
 
+    # NEW: Sensitivity analysis results (threshold sweeps)
+    sensitivity: Optional[List[Dict[str, float]]] = None
+
 
 # =============================================================================
 # SCRIPT DETECTION (IMPROVED - rejects code-mixed)
@@ -280,11 +449,30 @@ def detect_scripts(text: str) -> Dict[str, float]:
         return {}
 
     ratios = {}
+    # Count only alphabetic characters for both numerator and denominator.
+    # This avoids ratios > 1.0 caused by counting combining marks (Mn/Mc)
+    # that are in script ranges but not category 'L'.
     for script_name, ranges in SCRIPT_RANGES.items():
-        count = sum(1 for c in text if _char_in_ranges(c, ranges))
+        count = sum(1 for c in alpha_chars if _char_in_ranges(c, ranges))
         ratios[script_name] = count / total_alpha
 
     return ratios
+
+
+def detect_script(text: str) -> str:
+    """Get the dominant script in text (compatibility wrapper).
+
+    Returns the script name with highest ratio, or 'unknown' if no scripts detected.
+    For more detailed analysis, use detect_scripts() which returns all ratios.
+    """
+    ratios = detect_scripts(text)
+    if not ratios:
+        return "unknown"
+    return max(ratios, key=ratios.get)
+
+
+# Compatibility alias for experiments that use the old name
+compute_semantic_similarity = semantic_similarity
 
 
 def is_target_script(
@@ -345,13 +533,156 @@ def detect_language(text: str) -> Tuple[str, float]:
     # For Latin, try to distinguish languages
     if primary_script == "latin":
         lang, confidence = _detect_latin_language(text, confidence)
+    # For Arabic script, use script-aware disambiguation
+    elif primary_script == "arabic":
+        lang, confidence = _detect_arabic_language(text, confidence)
     
     return lang, confidence
+
+
+def is_reliable_language_detection(text: str) -> Tuple[bool, str, float]:
+    """Check if detected language is reliable (confidence >= threshold).
+
+    Returns:
+        (is_reliable, detected_lang, confidence)
+    """
+    lang, conf = detect_language(text)
+    return conf >= LID_CONFIDENCE_THRESHOLD, lang, conf
+
+
+def get_language_with_confidence(text: str) -> Tuple[str, float, bool]:
+    """Get detected language with confidence and reliability flag.
+
+    This is the primary API for experiments needing LID with quality metrics.
+
+    Returns:
+        (language_code, confidence, is_reliable)
+    """
+    lang, conf = detect_language(text)
+    reliable = conf >= LID_CONFIDENCE_THRESHOLD
+    return lang, conf, reliable
+
+
+_FASTTEXT_LID_CONFIG: Optional[Any] = None
+
+
+def _fasttext_langdetect(text: str, allowed_langs: Optional[Set[str]] = None) -> Optional[Tuple[str, float]]:
+    """FastText-based language identification (optional).
+
+    Uses the `fast-langdetect` package (recommended) which wraps fastText LID
+    models without requiring compilation on many platforms.
+
+    Env vars:
+      - LID_BACKEND=fasttext|auto|langid|regex
+      - FASTTEXT_MODEL=lite|full (default: full)
+      - FASTTEXT_LID_MODEL_PATH=/path/to/lid.176.ftz|lid.176.bin (optional)
+      - FASTTEXT_CACHE_DIR=/path/to/cache (optional)
+      - FASTTEXT_DISABLE_VERIFY=1 (optional)
+    """
+    global _FASTTEXT_LID_CONFIG
+    try:
+        from fast_langdetect import detect as ft_detect  # type: ignore
+        from fast_langdetect import LangDetectConfig  # type: ignore
+    except Exception:
+        return None
+
+    # Model choice also influences which local default model we prefer.
+    model_choice = os.environ.get("FASTTEXT_MODEL", "full").strip().lower()
+    if model_choice not in ("full", "lite"):
+        model_choice = "full"
+
+    if _FASTTEXT_LID_CONFIG is None:
+        model_path = os.environ.get("FASTTEXT_LID_MODEL_PATH", "").strip()
+        if not model_path:
+            # Prefer local models/ when available to avoid network downloads at
+            # runtime. This is also reviewer-friendly because it makes LID
+            # deterministic across runs.
+            base_dir = Path(__file__).resolve().parent / "models"
+            preferred = base_dir / ("lid.176.bin" if model_choice == "full" else "lid.176.ftz")
+            fallback = base_dir / ("lid.176.ftz" if model_choice == "full" else "lid.176.bin")
+            if preferred.exists():
+                model_path = str(preferred)
+            elif fallback.exists():
+                model_path = str(fallback)
+
+        if model_path and not Path(model_path).exists():
+            print(
+                f"[eval] Warning: FASTTEXT_LID_MODEL_PATH='{model_path}' does not exist; "
+                "falling back to fast-langdetect defaults."
+            )
+            model_path = ""
+
+        cache_dir = os.environ.get("FASTTEXT_CACHE_DIR", "").strip()
+        disable_verify = str(os.environ.get("FASTTEXT_DISABLE_VERIFY", "0")).lower() in ("1", "true", "yes")
+        kwargs: Dict[str, Any] = {}
+        if model_path:
+            kwargs["custom_model_path"] = model_path
+        if cache_dir:
+            kwargs["cache_dir"] = cache_dir
+        if disable_verify:
+            kwargs["disable_verify"] = True
+        try:
+            _FASTTEXT_LID_CONFIG = LangDetectConfig(**kwargs)
+        except Exception:
+            # Older versions may not support all kwargs; fall back.
+            _FASTTEXT_LID_CONFIG = LangDetectConfig()
+
+    try:
+        res = ft_detect(text, model=model_choice, k=1, config=_FASTTEXT_LID_CONFIG)
+    except TypeError:
+        # Backward-compatible call for older fast-langdetect APIs.
+        try:
+            res = ft_detect(text)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+    if not res or not isinstance(res, list):
+        return None
+    cand = res[0]
+    if not isinstance(cand, dict):
+        return None
+    lang = cand.get("lang")
+    score = cand.get("score")
+    if not isinstance(lang, str):
+        return None
+    if allowed_langs is not None and lang not in allowed_langs:
+        return None
+    try:
+        score_f = float(score) if score is not None else 0.0
+    except Exception:
+        score_f = 0.0
+    return lang, score_f
 
 
 def _detect_latin_language(text: str, base_conf: float) -> Tuple[str, float]:
     """Detect which Latin-script language."""
     text_lower = text.lower()
+
+    backend = os.environ.get("LID_BACKEND", "auto").strip().lower()
+    if backend in ("fasttext", "auto"):
+        ft = _fasttext_langdetect(text_lower, allowed_langs={"en", "de", "es", "fr"})
+        if ft is not None:
+            lid_lang, lid_score = ft
+            conf = base_conf * 0.8 + 0.2 * float(max(0.0, min(1.0, lid_score)))
+            return lid_lang, conf
+
+    # Optional lightweight LID backend (langid). This is more robust than
+    # regex for short Latin-script outputs and reduces EN/DE/ES/FR confusion.
+    if backend in ("langid", "auto"):
+        try:
+            import langid  # type: ignore
+
+            # Restrict to languages we care about for controls.
+            langid.set_languages(["en", "de", "es", "fr"])
+            lid_lang, lid_score = langid.classify(text_lower)
+            if lid_lang in ("en", "de", "es", "fr"):
+                # langid score is uncalibrated; treat it as weak evidence.
+                conf = base_conf * 0.8
+                return lid_lang, conf
+        except Exception:
+            pass
     
     patterns = {
         "de": r'\b(der|die|das|und|ist|ein|nicht|sie|ich|mit)\b',
@@ -369,6 +700,42 @@ def _detect_latin_language(text: str, base_conf: float) -> Tuple[str, float]:
     return best, base_conf * min(1.0, scores[best] / 5)
 
 
+def _detect_arabic_language(text: str, base_conf: float) -> Tuple[str, float]:
+    """Disambiguate Arabic-script languages (Urdu vs Arabic).
+    
+    If LID backend (FastText/LangID) is available, use it to distinguish.
+    Otherwise, default to 'ur' but with lower confidence if no Urdu-specific chars found.
+    """
+    text_lower = text.lower()
+    
+    # Try FastText (preferred)
+    ft = _fasttext_langdetect(text_lower, allowed_langs={"ur", "ar"})
+    if ft is not None:
+        lid_lang, lid_score = ft
+        # Boost confidence if it agrees with script
+        final_conf = base_conf * 0.7 + 0.3 * float(max(0.0, min(1.0, lid_score)))
+        return lid_lang, final_conf
+
+    # Try LangID
+    try:
+        import langid
+        langid.set_languages(["ur", "ar"])
+        lid_lang, _ = langid.classify(text_lower)
+        if lid_lang in ("ur", "ar"):
+             return lid_lang, base_conf * 0.9
+    except ImportError:
+        pass
+
+    # Fallback heuristics
+    # Urdu specific chars: ٹ ڈ ڑ ں ے ہ
+    urdu_chars = set("ٹڈڑںےہ")
+    if any(c in urdu_chars for c in text):
+        return "ur", base_conf
+    
+    # Default to 'ur' as per project focus, but lower confidence if ambiguous.
+    return "ur", base_conf * 0.8
+
+
 def is_code_mixed(text: str, threshold: float = 0.2) -> bool:
     """Check if text is code-mixed (multiple scripts present)."""
     ratios = detect_scripts(text)
@@ -381,14 +748,38 @@ def is_code_mixed(text: str, threshold: float = 0.2) -> bool:
 # =============================================================================
 
 def compute_ngram_repetition(text: str, n: int) -> float:
-    """Compute n-gram repetition rate."""
-    if not text or len(text) < n:
+    """Compute n-gram repetition rate.
+
+    By default we measure repetition over whitespace tokens (more robust for
+    multilingual text than character n-grams). If the text is too short to
+    form token n-grams, we fall back to character n-grams.
+
+    Set REPETITION_UNIT=char to force the legacy character-based metric.
+    """
+    if not text:
         return 0.0
-    
-    ngrams = [text[i:i+n] for i in range(len(text) - n + 1)]
+
+    unit = os.environ.get("REPETITION_UNIT", "token").strip().lower() or "token"
+
+    def _char_repetition(t: str) -> float:
+        if len(t) < n:
+            return 0.0
+        ngrams = [t[i : i + n] for i in range(len(t) - n + 1)]
+        if not ngrams:
+            return 0.0
+        counts = Counter(ngrams)
+        return (len(ngrams) - len(counts)) / len(ngrams)
+
+    if unit in ("char", "character"):
+        return _char_repetition(text)
+
+    tokens = text.split()
+    if len(tokens) < n:
+        return _char_repetition(text)
+
+    ngrams = [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
     if not ngrams:
         return 0.0
-    
     counts = Counter(ngrams)
     return (len(ngrams) - len(counts)) / len(ngrams)
 
@@ -448,7 +839,7 @@ def dice_overlap(set_a: Set, set_b: Set) -> float:
 
 
 ###############################################################################
-# LLM-AS-JUDGE WITH CALIBRATION (Lee et al., 2025)
+# LLM-AS-JUDGE WITH CALIBRATION
 ###############################################################################
 
 # Mapping from language code to human-readable description used in the
@@ -545,37 +936,78 @@ def llm_judge_gemini(
         or os.environ.get("GEMINI_API_KEY", "")
     )
 
+    # Fail fast if API key is absent to avoid repeated HTTP errors that would
+    # masquerade as missing judge scores in downstream analyses.
+    if not api_key:
+        return None
+
     if not api_key or _GEMINI_AVAILABLE is False:
         return None
 
+    _load_llm_judge_cache()
+    key = _judge_cache_key(prompt, output, lang_code)
+    if key in _LLM_JUDGE_CACHE:
+        return _LLM_JUDGE_CACHE[key]
+
+    max_rpm = int(os.environ.get("GEMINI_MAX_RPM", "60"))
+    max_retries = int(os.environ.get("GEMINI_MAX_RETRIES", "5"))
+
     try:
         import google.generativeai as genai
-
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel("gemini-2.5-flash")
-
-        cfg = LANG_JUDGE_CONFIG.get(lang_code, LANG_JUDGE_CONFIG["hi"])
-        response = model.generate_content(
-            JUDGE_PROMPT.format(
-                prompt=prompt,
-                output=output,
-                lang_name=cfg["name"],
-                script_name=cfg["script"],
-            )
-        )
-        text = response.text.strip()
-
-        # Strip markdown fences
-        if text.startswith("```"):
-            text = re.sub(r"```\w*\n?", "", text).strip()
-            if text.endswith("```"):
-                text = text[:-3].strip()
-
-        return json.loads(text)
-
     except Exception as e:
-        print(f"[eval] LLM judge error: {e}")
+        print(f"[eval] LLM judge import/config error: {e}")
         return None
+
+    cfg = LANG_JUDGE_CONFIG.get(lang_code, LANG_JUDGE_CONFIG["hi"])
+    prompt_text = JUDGE_PROMPT.format(
+        prompt=prompt,
+        output=output,
+        lang_name=cfg["name"],
+        script_name=cfg["script"],
+    )
+
+    for attempt in range(max_retries):
+        try:
+            _respect_gemini_rpm(max_rpm)
+            response = model.generate_content(
+                prompt_text,
+                generation_config={"temperature": 0.0},
+            )
+            text = response.text.strip()
+
+            # Strip markdown fences
+            if text.startswith("```"):
+                text = re.sub(r"```\w*\n?", "", text).strip()
+                if text.endswith("```"):
+                    text = text[:-3].strip()
+
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                _LLM_JUDGE_CACHE[key] = parsed
+                try:
+                    _LLM_JUDGE_CACHE_PATH.parent.mkdir(exist_ok=True)
+                    with _LLM_JUDGE_CACHE_PATH.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({"key": key, "response": parsed}) + "\n")
+                except Exception:
+                    pass
+                return parsed
+
+            # Unexpected structure; don't retry endlessly.
+            return None
+
+        except Exception as e:
+            msg = str(e)
+            if "429" in msg or "Resource exhausted" in msg:
+                backoff = min(60.0, (2 ** attempt) * 2.0 + random.random())
+                print(f"[eval] Gemini rate-limited (attempt {attempt+1}/{max_retries}); sleeping {backoff:.1f}s.")
+                time.sleep(backoff)
+                continue
+            print(f"[eval] LLM judge error: {e}")
+            return None
+
+    return None
 
 
 def _clip(x: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -584,18 +1016,28 @@ def _clip(x: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 def bias_adjusted_estimator(p: float, q0: float, q1: float) -> float:
-    """Compute bias-adjusted accuracy estimate (Lee et al., 2025 Eq. 4).
-    
+    """Compute bias-adjusted accuracy estimate under known judge error rates.
+
     θ̂ = (p̂ + q₀ - 1) / (q₀ + q₁ - 1)
-    
+
     Args:
         p: Raw proportion judged correct
         q0: Specificity (judge accuracy on truly incorrect)
         q1: Sensitivity (judge accuracy on truly correct)
+
+    Raises:
+        ValueError: If inputs contain NaN or are outside [0, 1]
     """
+    # Validate inputs to prevent silent NaN propagation
+    import math
+    if any(math.isnan(x) for x in [p, q0, q1]):
+        raise ValueError(f"NaN input to bias correction: p={p}, q0={q0}, q1={q1}")
+    if not all(0.0 <= x <= 1.0 for x in [p, q0, q1]):
+        raise ValueError(f"Inputs must be in [0,1]: p={p}, q0={q0}, q1={q1}")
+
     if q0 + q1 <= 1:
         return p  # Can't correct if judge is worse than random
-    
+
     theta = (p + q0 - 1) / (q0 + q1 - 1)
     return _clip(theta)
 
@@ -605,7 +1047,7 @@ def confidence_interval(
     n: int, m0: int, m1: int,
     alpha: float = 0.05
 ) -> Tuple[float, float]:
-    """Compute confidence interval for θ (Lee et al., 2025 Eq. 5-7).
+    """Compute confidence interval for θ under a sensitivity/specificity model.
     
     Args:
         p: Raw proportion (test set)
@@ -646,7 +1088,11 @@ def confidence_interval(
         + (1 - theta_tilde)**2 * q0_tilde * (1 - q0_tilde) / m0_tilde
         + theta_tilde**2 * q1_tilde * (1 - q1_tilde) / m1_tilde
     )
-    se = sqrt(var_term) / (q0_tilde + q1_tilde - 1)
+    # Guard against division by zero when q0_tilde + q1_tilde ≈ 1
+    denom = q0_tilde + q1_tilde - 1
+    if abs(denom) < 1e-10:
+        return (0.0, 1.0)  # Uninformative CI when correction impossible
+    se = sqrt(var_term) / denom
     
     # Confidence interval
     lower = _clip(theta_tilde + d_theta - z * se)
@@ -678,8 +1124,15 @@ def calibrate_judge(
     n_truly_correct = sum(ground_truth)
     n_truly_incorrect = len(ground_truth) - n_truly_correct
     
-    q1 = true_positives / n_truly_correct if n_truly_correct > 0 else 0.5
-    q0 = true_negatives / n_truly_incorrect if n_truly_incorrect > 0 else 0.5
+    if n_truly_correct == 0 or n_truly_incorrect == 0:
+        print(
+            "[eval] Warning: calibration set lacks both correct/incorrect labels; "
+            "returning neutral q0=q1=0.5. Calibrated judge estimates will be unreliable."
+        )
+        return 0.5, 0.5
+
+    q1 = true_positives / n_truly_correct
+    q0 = true_negatives / n_truly_incorrect
     
     return q0, q1
 
@@ -692,7 +1145,7 @@ def evaluate_with_calibrated_judge(
 ) -> CalibratedJudgeResult:
     """Full evaluation with calibrated LLM-as-judge.
     
-    This implements the method from Lee et al. (2025):
+    Outline:
     1. Run judge on calibration set to estimate q0, q1
     2. Run judge on test set to get raw p̂
     3. Compute bias-adjusted θ̂ and confidence interval
@@ -764,22 +1217,32 @@ def evaluate_with_calibrated_judge(
 # CALIBRATION TABLE HELPERS (re-use q0, q1 across experiments)
 # =============================================================================
 
-_JUDGE_CALIBRATION_TABLE: Optional[Dict[str, Dict[str, float]]] = None
+# Cache calibration tables per path so 2B and 9B runs do not accidentally
+# share statistics within the same process.
+_JUDGE_CALIBRATION_CACHE: Dict[str, Dict[str, Dict[str, float]]] = {}
 
 
 def load_judge_calibration_table(
-    path: str = "results/exp11_judge_calibration.json",
+    path: Optional[str] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Load per-language judge calibration stats from Exp11.
+
+    If `path` is None, we automatically choose a model-matched calibration file:
+      - results/exp11_judge_calibration.json for 2B runs
+      - results/exp11_judge_calibration_9b.json for 9B runs (USE_9B=1)
 
     Returns a mapping:
         lang -> {q0, q1, n_calib_0, n_calib_1}
 
     If the file is missing or malformed, returns an empty dict.
     """
-    global _JUDGE_CALIBRATION_TABLE
-    if _JUDGE_CALIBRATION_TABLE is not None:
-        return _JUDGE_CALIBRATION_TABLE
+    if path is None:
+        use_9b = str(os.environ.get("USE_9B", "0")).lower() in ("1", "true", "yes")
+        suffix = "_9b" if use_9b else ""
+        path = f"results/exp11_judge_calibration{suffix}.json"
+
+    if path in _JUDGE_CALIBRATION_CACHE:
+        return _JUDGE_CALIBRATION_CACHE[path]
 
     table: Dict[str, Dict[str, float]] = {}
     try:
@@ -795,6 +1258,12 @@ def load_judge_calibration_table(
             n1 = stats.get("n_calib_1")
             if None in (q0, q1, n0, n1):
                 continue
+            if int(n0) < MIN_JUDGE_CALIB_PER_CLASS or int(n1) < MIN_JUDGE_CALIB_PER_CLASS:
+                print(
+                    f"[eval] Calibration for '{lang}' below MIN_JUDGE_CALIB_PER_CLASS="
+                    f"{MIN_JUDGE_CALIB_PER_CLASS} (n0={n0}, n1={n1}); skipping calibrated judge."
+                )
+                continue
             table[lang] = {
                 "q0": float(q0),
                 "q1": float(q1),
@@ -802,11 +1271,14 @@ def load_judge_calibration_table(
                 "n_calib_1": int(n1),
             }
     except FileNotFoundError:
-        print("[eval] Judge calibration file not found; calibrated summaries will be unavailable.")
+        print(
+            f"[eval] Judge calibration file '{path}' not found; "
+            "calibrated summaries will be unavailable."
+        )
     except Exception as e:
-        print(f"[eval] Error loading judge calibration file: {e}")
+        print(f"[eval] Error loading judge calibration file '{path}': {e}")
 
-    _JUDGE_CALIBRATION_TABLE = table
+    _JUDGE_CALIBRATION_CACHE[path] = table
     return table
 
 
@@ -827,6 +1299,10 @@ def calibrated_judge_from_results(
 
     stats = calibration_table.get(lang)
     if not stats:
+        print(
+            f"[eval] No calibration available for language '{lang}'; "
+            "omitting calibrated judge metrics for this language."
+        )
         return None
 
     q0 = stats["q0"]
@@ -871,7 +1347,8 @@ def evaluate_steering_output(
     method: str = "unknown",
     strength: float = 0.0,
     layer: int = 0,
-    reference: str = None,
+    semantic_reference: Optional[str] = None,
+    qa_references: Any = None,
     target_script: str = "devanagari",
     use_llm_judge: bool = False,
     compute_semantics: bool = True,
@@ -889,15 +1366,35 @@ def evaluate_steering_output(
     rep_5 = compute_ngram_repetition(output, 5)
     degraded = is_degraded(output)
     
+    # QA reference handling: allow either a single string or a list of strings.
+    qa_refs: List[str] = []
+    if qa_references is not None:
+        if isinstance(qa_references, list):
+            qa_refs = [r for r in qa_references if isinstance(r, str)]
+        elif isinstance(qa_references, str):
+            qa_refs = [qa_references]
+        else:
+            qa_refs = [str(qa_references)]
+
     # Semantic similarity
     sem_sim = -1.0
     sem_ok = False
-    ref_text = reference or prompt
+    ref_text = (
+        semantic_reference
+        if (semantic_reference is not None and str(semantic_reference).strip())
+        else prompt
+    )
     
     if compute_semantics and ref_text:
         sem_sim = semantic_similarity(ref_text, output)
         if sem_sim >= 0:
             sem_ok = sem_sim >= SEMANTIC_SIM_THRESHOLD
+
+    # QA metrics (only meaningful when we have a gold reference answer)
+    em = f1 = None
+    if qa_refs:
+        em = qa_exact_match(output, qa_refs)
+        f1 = qa_f1(output, qa_refs)
     
     # LLM judge
     llm_lang = llm_faith = llm_coh = 0.0
@@ -916,14 +1413,28 @@ def evaluate_steering_output(
         llm_raw = raw
 
         if isinstance(candidate, dict):
-            llm_lang = candidate.get("language", 0)
-            llm_faith = candidate.get("faithfulness", 0)
-            llm_coh = candidate.get("coherence", 0)
+            def _coerce_score(v: Any) -> float:
+                try:
+                    x = float(v)
+                except Exception:
+                    return 0.0
+                if not np.isfinite(x):
+                    return 0.0
+                # Judge rubric is 1–5; clamp defensively.
+                return float(max(0.0, min(5.0, x)))
+
+            llm_lang = _coerce_score(candidate.get("language", 0))
+            llm_faith = _coerce_score(candidate.get("faithfulness", 0))
+            llm_coh = _coerce_score(candidate.get("coherence", 0))
     
     # Overall success: target script + not degraded + semantics OK (if computed)
     success = is_target and not degraded
-    if compute_semantics and sem_sim >= 0:
-        success = success and sem_ok
+    if compute_semantics:
+        if sem_sim < 0:
+            # Semantic model unavailable/failed: treat as failure to avoid optimistic bias.
+            success = False
+        else:
+            success = success and sem_ok
     
     return SteeringEvalResult(
         prompt=prompt,
@@ -940,6 +1451,8 @@ def evaluate_steering_output(
         semantic_similarity=sem_sim,
         semantics_ok=sem_ok,
         reference=ref_text,
+        qa_exact_match=em,
+        qa_f1=f1,
         llm_language_score=llm_lang,
         llm_faithfulness_score=llm_faith,
         llm_coherence_score=llm_coh,
@@ -948,22 +1461,123 @@ def evaluate_steering_output(
     )
 
 
-def _bootstrap_ci_simple(values: List[float], n_bootstrap: int = 2000, seed: int = 42) -> Tuple[float, float]:
-    """Simple bootstrap CI computation (avoids circular import with stats.py)."""
+def _bootstrap_ci_simple(values: List[float], n_bootstrap: int = 10000, seed: int = 42) -> Tuple[float, float]:
+    """Simple bootstrap CI computation (avoids circular import with stats.py).
+
+    Default resamples match the paper/config (10,000) for consistency.
+    """
     if not values or len(values) < 2:
         mean_val = np.mean(values) if values else 0.0
         return (mean_val, mean_val)
 
     rng = np.random.RandomState(seed)
-    n = len(values)
-    arr = np.array(values)
+    arr = np.asarray(values, dtype=float)
+    n = int(arr.shape[0])
 
-    bootstrap_means = []
-    for _ in range(n_bootstrap):
-        resample = rng.choice(arr, size=n, replace=True)
-        bootstrap_means.append(np.mean(resample))
+    # Vectorized bootstrap in chunks (much faster than Python loops and avoids
+    # allocating a full [n_bootstrap, n] index matrix at once).
+    batch = int(os.environ.get("BOOTSTRAP_BATCH", "1024"))
+    batch = max(1, min(batch, n_bootstrap))
+    boot_means = np.empty(int(n_bootstrap), dtype=float)
+    filled = 0
+    while filled < n_bootstrap:
+        k = min(batch, n_bootstrap - filled)
+        idx = rng.randint(0, n, size=(k, n))
+        boot_means[filled : filled + k] = arr[idx].mean(axis=1)
+        filled += k
 
-    return (float(np.percentile(bootstrap_means, 2.5)), float(np.percentile(bootstrap_means, 97.5)))
+    return (
+        float(np.percentile(boot_means, 2.5)),
+        float(np.percentile(boot_means, 97.5)),
+    )
+
+
+def estimate_power_binary(p1: float, p2: float, n: int, alpha: float = 0.05) -> float:
+    """Approximate power for difference in proportions (normal approx).
+
+    Args:
+        p1, p2: proportions to compare (baseline vs treatment)
+        n: number of paired samples (treated as per-condition count)
+        alpha: significance level
+
+    Returns:
+        Approximate power (0-1)
+    """
+    import math
+    if n <= 0:
+        return 0.0
+    p_bar = 0.5 * (p1 + p2)
+    se = math.sqrt(2 * p_bar * (1 - p_bar) / n)
+    if se == 0:
+        return 0.0
+    z = (p2 - p1) / se
+    from scipy.stats import norm
+    z_alpha = norm.ppf(1 - alpha / 2)
+    # two-sided approximation
+    power = norm.cdf(z - z_alpha) + (1 - norm.cdf(z + z_alpha))
+    return float(max(0.0, min(1.0, power)))
+
+
+def estimate_power_paired(values_a: List[float], values_b: List[float], alpha: float = 0.05) -> Optional[float]:
+    """Approximate power for a paired mean-difference test using normal approx.
+
+    This is a lightweight approximation based on paired Cohen's d:
+      d = mean(diff) / std(diff)
+      z ≈ |d| * sqrt(n)
+      power ≈ Φ(z - z_alpha)
+    """
+    if not values_a or not values_b:
+        return None
+    if len(values_a) != len(values_b):
+        return None
+    if len(values_a) < 2:
+        return None
+    a = np.asarray(values_a, dtype=float)
+    b = np.asarray(values_b, dtype=float)
+    diff = b - a
+    sd = float(np.std(diff, ddof=1))
+    if sd == 0.0:
+        return None
+    d = float(np.mean(diff) / sd)
+    z_alpha = norm.ppf(1 - alpha / 2)
+    z = abs(d) * float(np.sqrt(len(diff)))
+    power = norm.cdf(z - z_alpha)
+    return float(max(0.0, min(1.0, power)))
+
+
+def estimate_power_independent(values_a: List[float], values_b: List[float], alpha: float = 0.05) -> Optional[float]:
+    """Approximate power for an independent two-sample mean-difference test.
+
+    Uses a large-sample normal approximation with Cohen's d and
+    n_eff = n1*n2/(n1+n2).
+    """
+    if not values_a or not values_b:
+        return None
+    if len(values_a) < 2 or len(values_b) < 2:
+        return None
+
+    a = np.asarray(values_a, dtype=float)
+    b = np.asarray(values_b, dtype=float)
+    n1 = int(a.shape[0])
+    n2 = int(b.shape[0])
+    if n1 < 2 or n2 < 2:
+        return None
+
+    var1 = float(np.var(a, ddof=1))
+    var2 = float(np.var(b, ddof=1))
+    denom = (n1 + n2 - 2)
+    if denom <= 0:
+        return None
+    pooled = float(np.sqrt(((n1 - 1) * var1 + (n2 - 1) * var2) / denom))
+    if pooled == 0.0 or not np.isfinite(pooled):
+        return None
+
+    d = float((np.mean(b) - np.mean(a)) / pooled)
+    n_eff = float(n1 * n2 / (n1 + n2))
+    z = abs(d) * float(np.sqrt(n_eff))
+    z_alpha = norm.ppf(1 - alpha / 2)
+    power = norm.cdf(-z_alpha - z) + (1 - norm.cdf(z_alpha - z))
+    return float(max(0.0, min(1.0, power)))
 
 
 def aggregate_results(
@@ -971,6 +1585,7 @@ def aggregate_results(
     target_script: str = "devanagari",
     _warn_on_default: bool = True,
     compute_separate_metrics: bool = True,
+    sensitivity_delta: float = 0.05,
 ) -> AggregateResults:
     """Aggregate evaluation results with separate metrics and bootstrap CIs.
 
@@ -1036,6 +1651,29 @@ def aggregate_results(
         sem_success_count = sum(1 for r in results if r.overall_success)
         sem_success = sem_success_count / n
 
+    # Sensitivity analysis: script ratio and semantic thresholds ± delta
+    sensitivity = None
+    if compute_separate_metrics and n >= 5:
+        thr_script = DEVANAGARI_THRESHOLD
+        thr_sem = SEMANTIC_SIM_THRESHOLD
+        variants = []
+        for ds in (-sensitivity_delta, 0.0, sensitivity_delta):
+            t_script = max(0.0, min(1.0, thr_script + ds))
+            t_sem = thr_sem + ds
+            variant_success = 0
+            for r in results:
+                is_script = r.script_ratios.get(target_script, 0) >= t_script
+                is_sem = (r.semantic_similarity >= t_sem) if r.semantic_similarity >= 0 else False
+                success_v = is_script and (not r.is_degraded) and (not sem_values or is_sem)
+                variant_success += 1 if success_v else 0
+            variants.append({
+                "delta": ds,
+                "threshold_script": t_script,
+                "threshold_sem": t_sem,
+                "success_rate": variant_success / n,
+            })
+        sensitivity = variants
+
     # Degradation
     deg_rate = sum(per_prompt_degraded) / n
 
@@ -1090,6 +1728,7 @@ def aggregate_results(
         per_prompt_script_success=per_prompt_script,
         per_prompt_semantic_sim=per_prompt_semantic,
         per_prompt_degraded=per_prompt_degraded,
+        sensitivity=sensitivity,
     )
 
 
@@ -1124,14 +1763,65 @@ if __name__ == "__main__":
     print("   ✓ Script detection passed (code-mixed rejected)\n")
     
     # 3. Bias correction
-    print("3. LLM-as-Judge bias correction (Lee et al., 2025)...")
+    print("3. LLM-as-Judge bias correction...")
     # Example: q0=0.7, q1=0.9 (imperfect judge)
     p_raw = 0.5
     theta = bias_adjusted_estimator(p_raw, q0=0.7, q1=0.9)
     print(f"   Raw: {p_raw:.2f}, Corrected: {theta:.2f}")
-    
+
     ci = confidence_interval(p_raw, 0.7, 0.9, n=100, m0=50, m1=50)
     print(f"   95% CI: [{ci[0]:.3f}, {ci[1]:.3f}]")
     print("   ✓ Bias correction implemented\n")
-    
+
+    # 4. Language detection (script-based + LID)
+    print("4. Language detection tests...")
+
+    # 4a. Devanagari should detect as Hindi
+    hindi_text = "नमस्ते, मेरा नाम राहुल है।"
+    hi_lang, hi_conf = detect_language(hindi_text)
+    assert hi_lang == "hi", f"Hindi text detected as '{hi_lang}', expected 'hi'"
+    print(f"   Hindi: '{hi_lang}' (conf={hi_conf:.2f}) ✓")
+
+    # 4b. Bengali script
+    bengali_text = "আমি বাংলায় কথা বলি।"
+    bn_lang, bn_conf = detect_language(bengali_text)
+    assert bn_lang == "bn", f"Bengali text detected as '{bn_lang}', expected 'bn'"
+    print(f"   Bengali: '{bn_lang}' (conf={bn_conf:.2f}) ✓")
+
+    # 4c. Latin-script English vs German (requires LID backend)
+    english_text = "The quick brown fox jumps over the lazy dog."
+    en_lang, en_conf = detect_language(english_text)
+    print(f"   English: '{en_lang}' (conf={en_conf:.2f})")
+
+    german_text = "Der schnelle braune Fuchs springt über den faulen Hund."
+    de_lang, de_conf = detect_language(german_text)
+    print(f"   German: '{de_lang}' (conf={de_conf:.2f})")
+
+    # 4d. Arabic script: Urdu vs Arabic (the hard case!)
+    # Note: These tests verify the detection runs; actual accuracy depends on LID backend
+    urdu_text = "میں پاکستان سے ہوں اور اردو بولتا ہوں۔"  # "I am from Pakistan and speak Urdu"
+    ur_lang, ur_conf = detect_language(urdu_text)
+    print(f"   Urdu text: '{ur_lang}' (conf={ur_conf:.2f})")
+
+    arabic_text = "أنا من مصر وأتكلم العربية."  # "I am from Egypt and speak Arabic"
+    ar_lang, ar_conf = detect_language(arabic_text)
+    print(f"   Arabic text: '{ar_lang}' (conf={ar_conf:.2f})")
+
+    # Check that at least the script is detected correctly (Arabic script for both)
+    ur_ratios = detect_scripts(urdu_text)
+    ar_ratios = detect_scripts(arabic_text)
+    assert ur_ratios.get("arabic", 0) > 0.5, "Urdu should have Arabic script"
+    assert ar_ratios.get("arabic", 0) > 0.5, "Arabic should have Arabic script"
+    print("   ✓ Arabic script detection works for both UR and AR")
+
+    # 4e. Confidence-aware API
+    print("\n5. Confidence-aware language detection...")
+    lang, conf, reliable = get_language_with_confidence(hindi_text)
+    print(f"   Hindi: lang='{lang}', conf={conf:.2f}, reliable={reliable}")
+    assert reliable, "Hindi with clear Devanagari should be reliable"
+
+    lang, conf, reliable = get_language_with_confidence("xyz")  # Ambiguous short text
+    print(f"   Short text: lang='{lang}', conf={conf:.2f}, reliable={reliable}")
+    print("   ✓ Confidence-aware API works\n")
+
     print("✓ All tests passed!")

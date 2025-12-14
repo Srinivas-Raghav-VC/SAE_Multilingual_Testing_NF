@@ -12,6 +12,7 @@ Usage:
 """
 
 import sys
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,6 +31,7 @@ from config import (
     SAE_RELEASE,
     SAE_WIDTH,
     MODEL_ID,
+    N_LAYERS,
 )
 
 
@@ -125,10 +127,10 @@ def validate_config() -> List[ValidationWarning]:
             "TARGET_LAYERS is empty. No layers will be analyzed.",
             severity="error"
         ))
-    elif max(TARGET_LAYERS) >= 26:  # Gemma 2B has 26 layers (0-25)
+    elif max(TARGET_LAYERS) >= N_LAYERS:
         warnings.append(ValidationWarning(
             f"TARGET_LAYERS contains layer {max(TARGET_LAYERS)} which may exceed model depth. "
-            "Gemma 2B has layers 0-25.",
+            f"Model {MODEL_ID} has layers 0-{N_LAYERS-1}.",
             severity="warning"
         ))
     
@@ -219,6 +221,38 @@ def validate_experiment_setup(verbose: bool = True) -> Tuple[bool, List[Validati
         else:
             print("   [OK] Configuration OK")
     
+    # Optional preregistration enforcement
+    if str(os.environ.get("STRICT_PREREG", "0")).lower() in ("1", "true", "yes"):
+        prereg_dir = Path("prereg")
+        required = [
+            "exp1_feature_discovery.md",
+            "exp3_hindi_urdu_fixed.md",
+            "exp5_hierarchical.md",
+            "exp8_scaling_9b_low_resource.md",
+            "exp9_layer_sweep_steering.md",
+            "exp10_attribution_occlusion.md",
+            "exp11_judge_calibration.md",
+            "exp12_qa_degradation.md",
+            "exp13_script_semantic_ablation.md",
+            "exp14_language_agnostic_space.md",
+            "exp15_steering_schedule_ablation.md",
+            "exp18_typological_features.md",
+            "exp19_crosslayer_causal.md",
+            "exp21_family_separation.md",
+            "exp22_feature_interpretation.md",
+            "exp23_hierarchy_causal.md",
+            "exp24_sae_detector.md",
+            "exp25_family_causal.md",
+        ]
+        for fname in required:
+            if not (prereg_dir / fname).exists():
+                all_warnings.append(
+                    ValidationWarning(
+                        f"STRICT_PREREG=1: missing prereg file {prereg_dir / fname}",
+                        severity="error",
+                    )
+                )
+
     # Check for critical errors
     errors = [w for w in all_warnings if w.severity == "error"]
     warnings_only = [w for w in all_warnings if w.severity == "warning"]

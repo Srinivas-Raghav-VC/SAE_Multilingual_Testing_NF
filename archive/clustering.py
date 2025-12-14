@@ -113,7 +113,7 @@ def extract_language_features(
     
     # Active features (those that activate above threshold on average)
     active_mask = mean_acts > activation_threshold
-    active_features = set(active_mask.nonzero().squeeze(-1).tolist())
+    active_features = set(int(i) for i in active_mask.nonzero(as_tuple=False).flatten().tolist())
     
     # Feature activations dict
     feature_activations = {

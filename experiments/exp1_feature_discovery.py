@@ -23,12 +23,14 @@ from config import (
     TARGET_LAYERS,
     MONOLINGUALITY_THRESHOLD,
     N_SAMPLES_DISCOVERY,
+    SEED,
 )
 from data import load_flores, load_samanantar_multilingual
 from model import GemmaWithSAE
+from reproducibility import seed_everything
 
 
-def compute_activation_rates(model, texts, layer, per_sentence: bool = True):
+def compute_activation_rates(model, texts, layer, per_sentence: bool = False):
     """Compute per-feature activation rates across texts.
 
     We treat a feature as "active" when its SAE activation is > 0.
@@ -37,10 +39,12 @@ def compute_activation_rates(model, texts, layer, per_sentence: bool = True):
         model: GemmaWithSAE instance
         texts: List of text samples
         layer: Layer to analyze
-        per_sentence: If True (default), compute P(feature active | sentence)
+        per_sentence: If True, compute P(feature active | sentence)
                      as the fraction of sentences where the feature activates
                      on ANY token. This prevents longer sentences from dominating.
-                     If False, use token-level computation (legacy behavior).
+                     If False (default), use token-level computation
+                     P(feature active | token), matching the activation-rate
+                     definition used in Exp3/6 and in the paper.
 
     Returns:
         Tensor of shape (n_features,) with activation rates in [0, 1]
@@ -198,9 +202,11 @@ def analyze_h3(results):
 
 
 def main():
+    seed_everything(SEED)
     # Load model
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
     
     # Load data for feature discovery
     # Use Samanantar for high-resource Indic languages where available,
@@ -208,10 +214,11 @@ def main():
     print("Loading data for feature discovery...")
     
     # Indic languages covered by Samanantar and used in this experiment
-    samanantar_langs = ["hi", "bn", "ta", "te"]
+    # Includes all 4 major Dravidian languages (ta, te, kn, ml) for complete coverage
+    samanantar_langs = ["hi", "bn", "ta", "te", "kn", "ml"]
     texts_by_lang = {}
-    
-    print("  Loading Samanantar for Indic languages (hi, bn, ta, te)...")
+
+    print("  Loading Samanantar for Indic languages (hi, bn, ta, te, kn, ml)...")
     sam_data = load_samanantar_multilingual(
         samanantar_langs, max_samples_per_lang=N_SAMPLES_DISCOVERY
     )
@@ -234,7 +241,13 @@ def main():
     
     if flores_langs:
         print("  Loading FLORES-200 for remaining languages...")
-        flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, languages=flores_langs)
+        # Use FLORES dev for feature estimation to avoid "double dipping" on the
+        # held-out devtest split used elsewhere for evaluation prompts.
+        flores = load_flores(
+            max_samples=N_SAMPLES_DISCOVERY,
+            languages=flores_langs,
+            split="dev",
+        )
         for lang, sents in flores.items():
             texts_by_lang[lang] = sents
     
@@ -263,9 +276,10 @@ def main():
             "dead_features": data["dead_features"],
         }
     
-    with open(output_dir / "exp1_feature_discovery.json", "w") as f:
+    out_path = output_dir / f"exp1_feature_discovery{suffix}.json"
+    with open(out_path, "w") as f:
         json.dump(json_results, f, indent=2)
-    print(f"\nResults saved to {output_dir / 'exp1_feature_discovery.json'}")
+    print(f"\nResults saved to {out_path}")
     
     # Analyze hypotheses
     analyze_h1(results)

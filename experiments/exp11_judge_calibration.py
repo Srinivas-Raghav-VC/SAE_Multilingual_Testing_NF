@@ -27,11 +27,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from typing import List, Dict
 import json
+import os
 
-from config import TARGET_LAYERS, N_SAMPLES_EVAL, STEERING_STRENGTHS
+from config import TARGET_LAYERS, N_SAMPLES_EVAL, STEERING_STRENGTHS, LANG_TO_SCRIPT, SEED
 from data import load_research_data
 from model import GemmaWithSAE
-from experiments.exp2_steering import (
+from steering_utils import (
     get_activation_diff_features,
     construct_sae_steering_vector,
 )
@@ -40,6 +41,7 @@ from evaluation_comprehensive import (
     evaluate_with_calibrated_judge,
     llm_judge_gemini,
 )
+from reproducibility import seed_everything
 
 
 def build_activation_diff_vector(model, train: Dict[str, List[str]], layer: int, target_lang: str, k: int = 25):
@@ -93,6 +95,7 @@ def run_calibration_for_language(lang: str, layer: int = 20, strength: float = 2
             layer=layer,
             compute_semantics=True,
             use_llm_judge=False,
+            target_script=LANG_TO_SCRIPT.get(lang, "devanagari"),
         )
         outputs.append(
             {
@@ -133,6 +136,8 @@ def main():
     print("=" * 60)
     print("EXPERIMENT 11: Calibrated LLM-as-Judge Evaluation (Gemini)")
     print("=" * 60)
+
+    seed_everything(SEED)
     
     # Choose a late-ish layer; 20 is typical steering layer
     # (this is not a hyperparam search, just a fixed probe)
@@ -169,7 +174,8 @@ def main():
     
     out_dir = Path("results")
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "exp11_judge_calibration.json"
+    suffix = "_9b" if str(os.environ.get("USE_9B", "0")).lower() in ("1", "true", "yes") else ""
+    out_path = out_dir / f"exp11_judge_calibration{suffix}.json"
     
     with open(out_path, "w") as f:
         json.dump(

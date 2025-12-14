@@ -15,7 +15,7 @@ Design:
              (b) Steered answer (with best steering config)
         3. Evaluate both with the comprehensive evaluation stack:
              - Script dominance (target script)
-             - Semantic similarity to gold answer (LaBSE)
+             - Baseline-preservation similarity: LaBSE(baseline, steered)
              - Degradation (repetition)
              - Optional Gemini judge (language/faithfulness/coherence)
         4. Aggregate and compare baseline vs steered.
@@ -30,15 +30,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import json
+import os
 from typing import Dict, List, Tuple
 
 from tqdm import tqdm
+from reproducibility import seed_everything
+import numpy as np
 
 from config import (
     TARGET_LAYERS,
     N_SAMPLES_DISCOVERY,
     N_SAMPLES_EVAL,
     LANG_TO_SCRIPT,
+    SEMANTIC_SIM_THRESHOLD,
 )
 from data import load_research_data
 from model import GemmaWithSAE
@@ -49,7 +53,10 @@ from evaluation_comprehensive import (
     semantic_similarity,
     load_judge_calibration_table,
     calibrated_judge_from_results,
+    get_semantic_truncation_stats,
+    estimate_power_paired,
 )
+from stats import wilcoxon_test, holm_bonferroni_correction, bootstrap_ci
 
 
 # Use centralized LANG_TO_SCRIPT from config.py for consistency
@@ -112,6 +119,18 @@ def run_qa_eval_for_lang(
     """Run baseline vs steered QA evaluation for a single language."""
     results_baseline = []
     results_steered = []
+    baseline_preservation_sims: List[float] = []
+
+    # Allow a QA-specific sample-size override without changing global config.
+    # This helps scaling/power checks when compute permits.
+    try:
+        n_qa_samples = int(os.environ.get("N_QA_EVAL_SAMPLES", str(N_SAMPLES_EVAL)))
+    except ValueError:
+        n_qa_samples = N_SAMPLES_EVAL
+    if n_qa_samples <= 0:
+        n_qa_samples = N_SAMPLES_EVAL
+    if "N_QA_EVAL_SAMPLES" in os.environ:
+        print(f"[exp12] Using {n_qa_samples} QA examples per language (env override).")
 
     script = LANG_TO_SCRIPT.get(target_lang)
     if script is None:
@@ -119,7 +138,7 @@ def run_qa_eval_for_lang(
         script = "devanagari"
 
     for ex in tqdm(
-        qa_examples[:N_SAMPLES_EVAL],
+        qa_examples[:n_qa_samples],
         desc=f"QA {target_lang} (baseline/steered)",
         leave=False,
     ):
@@ -144,10 +163,11 @@ def run_qa_eval_for_lang(
                 method="baseline",
                 strength=0.0,
                 layer=-1,
-                reference=gold,
+                qa_references=gold,
                 target_script=script,
                 use_llm_judge=use_llm_judge,
-                compute_semantics=True,
+                judge_lang=target_lang,
+                compute_semantics=False,
             )
         results_baseline.append(res_base)
 
@@ -165,15 +185,39 @@ def run_qa_eval_for_lang(
                 method="steered",
                 strength=steering_strength,
                 layer=steering_layer,
-                reference=gold,
+                qa_references=gold,
                 target_script=script,
                 use_llm_judge=use_llm_judge,
-                compute_semantics=True,
+                judge_lang=target_lang,
+                compute_semantics=False,
             )
         results_steered.append(res_steer)
 
+        # Semantic preservation proxy for QA: compare baseline vs steered outputs.
+        # (Prompt-vs-answer similarity is not meaningful for long contexts.)
+        baseline_preservation_sims.append(semantic_similarity(base_out, steered_out))
+
     agg_base = aggregate_results(results_baseline, target_script=script)
     agg_steer = aggregate_results(results_steered, target_script=script)
+
+    pres_vals = [v for v in baseline_preservation_sims if v is not None and v >= 0.0]
+    pres_mean = float(sum(pres_vals) / len(pres_vals)) if pres_vals else None
+    pres_rate = (
+        float(sum(1 for v in pres_vals if v >= SEMANTIC_SIM_THRESHOLD) / len(pres_vals))
+        if pres_vals
+        else None
+    )
+
+    def _mean_optional(values):
+        vals = [v for v in values if v is not None]
+        if not vals:
+            return None
+        return float(sum(vals) / len(vals))
+
+    qa_em_base = _mean_optional([r.qa_exact_match for r in results_baseline])
+    qa_f1_base = _mean_optional([r.qa_f1 for r in results_baseline])
+    qa_em_steer = _mean_optional([r.qa_exact_match for r in results_steered])
+    qa_f1_steer = _mean_optional([r.qa_f1 for r in results_steered])
 
     # Calibrated judge summaries (if calibration stats exist for this lang).
     cal_table = load_judge_calibration_table()
@@ -206,6 +250,91 @@ def run_qa_eval_for_lang(
             "n_calib_1": cj.n_calib_1,
         }
 
+    # ------------------------------------------------------------------
+    # Paired statistical tests: baseline vs steered
+    # ------------------------------------------------------------------
+    paired_tests: Dict[str, Dict] = {}
+    p_vals: List[float] = []
+    names: List[str] = []
+
+    # Overall success (binary)
+    overall_base = [1 if r.overall_success else 0 for r in results_baseline]
+    overall_steer = [1 if r.overall_success else 0 for r in results_steered]
+    res_overall = wilcoxon_test(overall_steer, overall_base)
+    paired_tests["overall_success"] = res_overall.to_dict()
+    p_vals.append(res_overall.p_value)
+    names.append("overall_success")
+
+    # QA F1 (only if available for enough pairs)
+    f1_pairs = [
+        (b.qa_f1, s.qa_f1)
+        for b, s in zip(results_baseline, results_steered)
+        if b.qa_f1 is not None and s.qa_f1 is not None
+    ]
+    if len(f1_pairs) >= 5:
+        f1_base = [b for b, _ in f1_pairs]
+        f1_steer = [s for _, s in f1_pairs]
+        res_f1 = wilcoxon_test(f1_steer, f1_base)
+        paired_tests["qa_f1"] = res_f1.to_dict()
+        p_vals.append(res_f1.p_value)
+        names.append("qa_f1")
+
+    # QA EM (binary)
+    em_pairs = [
+        (b.qa_exact_match, s.qa_exact_match)
+        for b, s in zip(results_baseline, results_steered)
+        if b.qa_exact_match is not None and s.qa_exact_match is not None
+    ]
+    if len(em_pairs) >= 5:
+        em_base = [b for b, _ in em_pairs]
+        em_steer = [s for _, s in em_pairs]
+        res_em = wilcoxon_test(em_steer, em_base)
+        paired_tests["qa_exact_match"] = res_em.to_dict()
+        p_vals.append(res_em.p_value)
+        names.append("qa_exact_match")
+
+    # Holm-Bonferroni correction across the tested metrics.
+    if p_vals:
+        corrected = holm_bonferroni_correction(p_vals)
+        for i, name in enumerate(names):
+            paired_tests[name]["adjusted_p"] = corrected["adjusted_p_values"][i]
+            paired_tests[name]["significant_corrected"] = corrected["significant"][i]
+            # Add simple power estimate for QA F1 if available
+            if name == "qa_f1":
+                try:
+                    paired_tests[name]["power"] = estimate_power_paired(f1_base, f1_steer)
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Publication decision criteria (preregistered-style)
+    # ------------------------------------------------------------------
+    decision: Dict[str, object] = {}
+    threshold = 0.02
+    if len(f1_pairs) >= 5:
+        diffs = [float(s - b) for b, s in f1_pairs]  # steered - baseline
+        ci = bootstrap_ci(diffs, statistic=np.mean)
+        mean_delta = float(np.mean(diffs))
+        # "Harmful" only if we have evidence of a negative shift (CI excludes 0)
+        harmful = (mean_delta < -threshold) and (ci.ci_high < 0.0)
+        beneficial = (mean_delta > threshold) and (ci.ci_low > 0.0)
+        decision["qa_f1"] = {
+            "mean_delta": mean_delta,
+            "ci_95_mean_delta": [ci.ci_low, ci.ci_high],
+            "threshold_abs": threshold,
+            "harmful": harmful,
+            "beneficial": beneficial,
+            "interpretation": (
+                "harmful" if harmful else "beneficial" if beneficial else "inconclusive"
+            ),
+        }
+    else:
+        decision["qa_f1"] = {
+            "status": "insufficient_data",
+            "n_pairs": len(f1_pairs),
+            "threshold_abs": threshold,
+        }
+
     return {
         "baseline": {
             "n_samples": agg_base.n_samples,
@@ -214,7 +343,13 @@ def run_qa_eval_for_lang(
             "avg_target_script_ratio": agg_base.avg_target_script_ratio,
             "avg_semantic_similarity": agg_base.avg_semantic_similarity,
             "degradation_rate": agg_base.degradation_rate,
+            "qa_exact_match": qa_em_base,
+            "qa_f1": qa_f1_base,
             "judge": _judge_dict(judge_base),
+            "sensitivity": agg_base.sensitivity,
+            "separate_metrics": agg_base.separate_metrics.to_dict()
+            if agg_base.separate_metrics
+            else None,
         },
         "steered": {
             "n_samples": agg_steer.n_samples,
@@ -223,8 +358,18 @@ def run_qa_eval_for_lang(
             "avg_target_script_ratio": agg_steer.avg_target_script_ratio,
             "avg_semantic_similarity": agg_steer.avg_semantic_similarity,
             "degradation_rate": agg_steer.degradation_rate,
+            "qa_exact_match": qa_em_steer,
+            "qa_f1": qa_f1_steer,
             "judge": _judge_dict(judge_steer),
+            "baseline_preservation_semantic_mean": pres_mean,
+            "baseline_preservation_semantic_rate": pres_rate,
+            "sensitivity": agg_steer.sensitivity,
+            "separate_metrics": agg_steer.separate_metrics.to_dict()
+            if agg_steer.separate_metrics
+            else None,
         },
+        "stats": paired_tests,
+        "decision": decision,
     }
 
 
@@ -232,6 +377,9 @@ def main():
     print("=" * 60)
     print("EXPERIMENT 12: QA Degradation Under Steering")
     print("=" * 60)
+
+    from config import SEED
+    seed_everything(SEED)
 
     # Load research data (includes QA + steering prompts)
     data_split = load_research_data(
@@ -247,9 +395,12 @@ def main():
     # Load model
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
 
     # Load best steering configs from Exp9 if available
-    exp9_path = Path("results") / "exp9_layer_sweep_steering.json"
+    exp9_path = Path("results") / f"exp9_layer_sweep_steering{suffix}.json"
+    if not exp9_path.exists():
+        exp9_path = Path("results") / "exp9_layer_sweep_steering.json"
 
     results: Dict[str, Dict] = {}
 
@@ -281,6 +432,22 @@ def main():
             steering_strength=strength,
             use_llm_judge=True,
         )
+        lang_results["steering_config"] = {
+            "layer": layer,
+            "strength": strength,
+            "method": method,
+        }
+        # Publication-grade decision rule: classify QA impact
+        qa_base = lang_results["baseline"].get("qa_f1")
+        qa_steer = lang_results["steered"].get("qa_f1")
+        if qa_base is not None and qa_steer is not None:
+            delta = qa_steer - qa_base
+            verdict = "no_effect"
+            if delta < -0.02:
+                verdict = "harmful"
+            elif delta > 0.02:
+                verdict = "improved"
+            lang_results["qa_impact"] = {"delta_f1": delta, "verdict": verdict}
         results[f"mlqa_{lang}"] = lang_results
 
     # IndicQA languages: HI/BN/TA/TE
@@ -311,11 +478,32 @@ def main():
             steering_strength=strength,
             use_llm_judge=True,
         )
+        lang_results["steering_config"] = {
+            "layer": layer,
+            "strength": strength,
+            "method": method,
+        }
+        qa_base = lang_results["baseline"].get("qa_f1")
+        qa_steer = lang_results["steered"].get("qa_f1")
+        if qa_base is not None and qa_steer is not None:
+            delta = qa_steer - qa_base
+            verdict = "no_effect"
+            if delta < -0.02:
+                verdict = "harmful"
+            elif delta > 0.02:
+                verdict = "improved"
+            lang_results["qa_impact"] = {"delta_f1": delta, "verdict": verdict}
         results[f"indicqa_{lang}"] = lang_results
+
+    # Attach LaBSE truncation stats inside each task block to avoid breaking
+    # downstream summaries that assume top-level keys are tasks.
+    sem_stats = get_semantic_truncation_stats()
+    for k in results:
+        results[k]["semantic_truncation_stats"] = sem_stats
 
     out_dir = Path("results")
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "exp12_qa_degradation.json"
+    out_path = out_dir / f"exp12_qa_degradation{suffix}.json"
 
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)

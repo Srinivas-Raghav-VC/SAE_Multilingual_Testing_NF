@@ -17,10 +17,11 @@ from pathlib import Path
 from typing import Set, Dict, Tuple
 from dataclasses import dataclass
 
-from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, SENSITIVITY_THRESHOLDS
+from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, SENSITIVITY_THRESHOLDS, SEED
 from data import load_flores
 from model import GemmaWithSAE
 from stats import bootstrap_ci
+from reproducibility import seed_everything
 
 
 @dataclass
@@ -93,15 +94,13 @@ def get_active_features(model, texts, layer, threshold=0.01) -> Set[int]:
         acts = model.get_sae_activations(text, layer)
         activation_counts += (acts > 0).float().sum(dim=0)
         total_tokens += acts.shape[0]
-    
+    if total_tokens == 0:
+        print(f"[exp3] Warning: total_tokens==0 for layer {layer}; returning empty active set.")
+        return set()
     rates = activation_counts / total_tokens
     active_mask = rates > threshold
-    active_features = set(active_mask.nonzero().squeeze(-1).tolist())
-    
-    # Handle edge case where only one feature is active
-    if isinstance(list(active_features)[0] if active_features else 0, int):
-        return active_features
-    return active_features
+    idx = active_mask.nonzero(as_tuple=False).flatten().tolist()
+    return set(int(i) for i in idx)
 
 
 def identify_script_vs_semantic(
@@ -159,14 +158,15 @@ def identify_script_vs_semantic(
     ur_script_mask = ur_active & ~hi_active
     
     return {
-        "semantic": set(semantic_mask.nonzero().squeeze(-1).tolist()),
-        "hi_script": set(hi_script_mask.nonzero().squeeze(-1).tolist()),
-        "ur_script": set(ur_script_mask.nonzero().squeeze(-1).tolist()),
+        "semantic": set(int(i) for i in semantic_mask.nonzero(as_tuple=False).flatten().tolist()),
+        "hi_script": set(int(i) for i in hi_script_mask.nonzero(as_tuple=False).flatten().tolist()),
+        "ur_script": set(int(i) for i in ur_script_mask.nonzero(as_tuple=False).flatten().tolist()),
     }
 
 
 def main():
     """Run Hindi-Urdu overlap experiment with CORRECT metrics."""
+    seed_everything(SEED)
     
     print("=" * 60)
     print("EXPERIMENT 3: Hindi-Urdu Feature Overlap (FIXED)")
@@ -176,10 +176,13 @@ def main():
     # Load model
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
     
     # Load data
     print("\nLoading FLORES-200...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
+    # Use FLORES dev for feature estimation; devtest is reserved for evaluation
+    # prompts in steering experiments.
+    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, split="dev")
     texts_hi = flores.get("hi", [])
     texts_ur = flores.get("ur", [])
     texts_en = flores.get("en", [])
@@ -357,10 +360,11 @@ def main():
     output_dir = Path("results")
     output_dir.mkdir(exist_ok=True)
     
-    with open(output_dir / "exp3_hindi_urdu_fixed.json", "w") as f:
+    out_path = output_dir / f"exp3_hindi_urdu_fixed{suffix}.json"
+    with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     
-    print(f"\n✓ Results saved to {output_dir / 'exp3_hindi_urdu_fixed.json'}")
+    print(f"\n✓ Results saved to {out_path}")
     
     return results
 

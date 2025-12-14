@@ -39,6 +39,10 @@ class ScriptSemanticsResult:
     hi_semantic: Set[int]
     family_semantic: Set[int]
     noise_script_only: Set[int]
+    jaccard_hi_deva_hi_latin: float
+    jaccard_hi_deva_noise: float
+    jaccard_hi_deva_ur: float
+    jaccard_hi_deva_bn: float
 
 
 def simple_transliterate_hi_to_latin(text: str) -> str:
@@ -122,11 +126,11 @@ def analyze_layer(
     bn_mask = compute_activation_mask(model, bn_texts, layer, rate_threshold)
 
     # Convert to sets of feature indices
-    hi_feats = set(hi_mask.nonzero().squeeze(-1).tolist())
-    hi_trans_feats = set(hi_trans_mask.nonzero().squeeze(-1).tolist())
-    noise_feats = set(noise_mask.nonzero().squeeze(-1).tolist())
-    ur_feats = set(ur_mask.nonzero().squeeze(-1).tolist())
-    bn_feats = set(bn_mask.nonzero().squeeze(-1).tolist())
+    hi_feats = set(int(i) for i in hi_mask.nonzero(as_tuple=False).flatten().tolist())
+    hi_trans_feats = set(int(i) for i in hi_trans_mask.nonzero(as_tuple=False).flatten().tolist())
+    noise_feats = set(int(i) for i in noise_mask.nonzero(as_tuple=False).flatten().tolist())
+    ur_feats = set(int(i) for i in ur_mask.nonzero(as_tuple=False).flatten().tolist())
+    bn_feats = set(int(i) for i in bn_mask.nonzero(as_tuple=False).flatten().tolist())
 
     print(f"  Hindi (Deva): {len(hi_feats)} active")
     print(f"  Hindi (Latin): {len(hi_trans_feats)} active")
@@ -149,10 +153,14 @@ def analyze_layer(
     noise_script_only = noise_feats - hi_feats
 
     # Sanity: Jaccard scores
-    print("  Jaccard(HI_Deva, HI_Latin): {:.1%}".format(jaccard_overlap(hi_feats, hi_trans_feats)))
-    print("  Jaccard(HI_Deva, Noise): {:.1%}".format(jaccard_overlap(hi_feats, noise_feats)))
-    print("  Jaccard(HI_Deva, UR): {:.1%}".format(jaccard_overlap(hi_feats, ur_feats)))
-    print("  Jaccard(HI_Deva, BN): {:.1%}".format(jaccard_overlap(hi_feats, bn_feats)))
+    j_hi_latin = float(jaccard_overlap(hi_feats, hi_trans_feats))
+    j_hi_noise = float(jaccard_overlap(hi_feats, noise_feats))
+    j_hi_ur = float(jaccard_overlap(hi_feats, ur_feats))
+    j_hi_bn = float(jaccard_overlap(hi_feats, bn_feats))
+    print("  Jaccard(HI_Deva, HI_Latin): {:.1%}".format(j_hi_latin))
+    print("  Jaccard(HI_Deva, Noise): {:.1%}".format(j_hi_noise))
+    print("  Jaccard(HI_Deva, UR): {:.1%}".format(j_hi_ur))
+    print("  Jaccard(HI_Deva, BN): {:.1%}".format(j_hi_bn))
 
     print(f"  HI script-only features: {len(hi_script_only)}")
     print(f"  HI semantic (script-robust) features: {len(hi_semantic)}")
@@ -165,6 +173,10 @@ def analyze_layer(
         hi_semantic=hi_semantic,
         family_semantic=family_semantic,
         noise_script_only=noise_script_only,
+        jaccard_hi_deva_hi_latin=j_hi_latin,
+        jaccard_hi_deva_noise=j_hi_noise,
+        jaccard_hi_deva_ur=j_hi_ur,
+        jaccard_hi_deva_bn=j_hi_bn,
     )
 
 
@@ -176,10 +188,13 @@ def main():
     # Load model
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
 
     # Load FLORES data for key languages
     print("\nLoading FLORES data...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
+    # Use FLORES dev for feature estimation; devtest is reserved for evaluation
+    # prompts in steering experiments.
+    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, split="dev")
     hi_texts = flores.get("hi", [])
     ur_texts = flores.get("ur", [])
     bn_texts = flores.get("bn", [])
@@ -201,6 +216,10 @@ def main():
             "hi_semantic": len(res.hi_semantic),
             "family_semantic": len(res.family_semantic),
             "noise_script_only": len(res.noise_script_only),
+            "jaccard_hi_deva_hi_latin": res.jaccard_hi_deva_hi_latin,
+            "jaccard_hi_deva_noise": res.jaccard_hi_deva_noise,
+            "jaccard_hi_deva_ur": res.jaccard_hi_deva_ur,
+            "jaccard_hi_deva_bn": res.jaccard_hi_deva_bn,
         }
 
     # Save summary
@@ -208,12 +227,12 @@ def main():
     out_dir.mkdir(exist_ok=True)
     import json
 
-    with open(out_dir / "exp6_script_semantics_controls.json", "w") as f:
+    out_path = out_dir / f"exp6_script_semantics_controls{suffix}.json"
+    with open(out_path, "w") as f:
         json.dump({str(k): v for k, v in results.items()}, f, indent=2)
 
-    print(f"\n✓ Results saved to {out_dir / 'exp6_script_semantics_controls.json'}")
+    print(f"\n✓ Results saved to {out_path}")
 
 
 if __name__ == "__main__":
     main()
-

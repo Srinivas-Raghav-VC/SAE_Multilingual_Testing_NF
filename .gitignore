@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+logs/
+models/
+results/
+subagent_logs/
+.codex_home/
+checkpoints/
+.venv/
+venv/
+.env

@@ -19,8 +19,21 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sae_lens import SAE
 
+import os
 import time
-from config import MODEL_ID, HIDDEN_DIM, ATTN_IMPLEMENTATION, HF_TOKEN, SAE_RELEASE, SAE_WIDTH
+from collections import OrderedDict
+from config import (
+    MODEL_ID,
+    MODEL_ID_9B,
+    ATTN_IMPLEMENTATION,
+    HF_TOKEN,
+    SAE_RELEASE,
+    SAE_RELEASE_2B,
+    SAE_RELEASE_9B,
+    SAE_WIDTH,
+    SAE_WIDTH_2B,
+    SAE_WIDTH_9B,
+)
 
 
 class GemmaWithSAE:
@@ -34,14 +47,44 @@ class GemmaWithSAE:
         sae_release: str = SAE_RELEASE,
         sae_width: str = SAE_WIDTH,
     ):
+        # Optional global scaling mode: set USE_9B=1 to run any experiment
+        # with Gemma 2 9B + corresponding Gemma Scope SAEs without modifying
+        # per-experiment code.
+        use_9b = str(os.environ.get("USE_9B", "0")).lower() in ("1", "true", "yes")
+        if use_9b and model_id == MODEL_ID:
+            model_id = MODEL_ID_9B
+        if use_9b and sae_release in (SAE_RELEASE, SAE_RELEASE_2B):
+            sae_release = SAE_RELEASE_9B
+        if use_9b and sae_width in (SAE_WIDTH, SAE_WIDTH_2B):
+            sae_width = SAE_WIDTH_9B
+
         self.device = device if torch.cuda.is_available() else "cpu"
-        self.dtype = dtype if self.device == "cuda" else torch.float32
+        # Handle device strings like "cuda:0" or "cuda:1" correctly
+        is_cuda = str(self.device).startswith("cuda")
+        self.dtype = dtype if is_cuda else torch.float32
         self.model = None
         self.tokenizer = None
-        self.saes = {}  # layer -> SAE
+        # Cache of loaded SAEs. Some experiments probe many layers and can OOM
+        # on shared GPUs if we keep every SAE on-device. Use SAE_CACHE_SIZE to
+        # cap this (LRU eviction).
+        self.saes: "OrderedDict[int, SAE]" = OrderedDict()
         self.model_id = model_id
         self.sae_release = sae_release
         self.sae_width = sae_width
+
+    def _sae_cache_limit(self) -> int | None:
+        """Return max number of SAEs to keep in memory (LRU).
+
+        Default to a small cap (2) to prevent VRAM blow‑up when sweeping many
+        layers. Users can override via SAE_CACHE_SIZE; 0 disables caching.
+        """
+        raw = os.environ.get("SAE_CACHE_SIZE", "").strip()
+        if not raw:
+            return 2  # sane default to avoid unbounded GPU cache
+        try:
+            return max(0, int(raw))
+        except Exception:
+            return 2
     
     def load_model(self):
         """Load the base Gemma model on a single device.
@@ -63,7 +106,7 @@ class GemmaWithSAE:
             "torch_dtype": self.dtype,
         }
         try:
-            if self.device == "cuda":
+            if str(self.device).startswith("cuda"):
                 model_kwargs["attn_implementation"] = ATTN_IMPLEMENTATION
         except Exception:
             print("Attention implementation config failed, using default.")
@@ -96,6 +139,8 @@ class GemmaWithSAE:
             RuntimeError: If SAE cannot be loaded after all retries
         """
         if layer in self.saes:
+            # Mark as most recently used.
+            self.saes.move_to_end(layer)
             return self.saes[layer]
         
         sae_id = f"layer_{layer}/width_{self.sae_width}/canonical"
@@ -111,7 +156,23 @@ class GemmaWithSAE:
                     device=self.device,
                 )
                 
-                self.saes[layer] = sae
+                cache_limit = self._sae_cache_limit()
+                if cache_limit is None or cache_limit > 0:
+                    self.saes[layer] = sae
+                    self.saes.move_to_end(layer)
+
+                    # LRU eviction to reduce peak VRAM (especially for 9B runs).
+                    if cache_limit is not None:
+                        while len(self.saes) > cache_limit:
+                            evicted_layer, evicted_sae = self.saes.popitem(last=False)
+                            if str(os.environ.get("SAE_CACHE_VERBOSE", "0")).lower() in ("1", "true", "yes"):
+                                print(f"[model] Evicted SAE layer {evicted_layer} from cache (SAE_CACHE_SIZE={cache_limit}).")
+                            try:
+                                del evicted_sae
+                            except Exception:
+                                pass
+                        if torch.cuda.is_available() and str(self.device).startswith("cuda"):
+                            torch.cuda.empty_cache()
                 print(f"SAE loaded: {sae.cfg.d_sae} features")
                 return sae
                 
@@ -139,12 +200,41 @@ class GemmaWithSAE:
         Returns:
             Tensor of shape (seq_len, hidden_dim)
         """
+        if self.model is None or self.tokenizer is None:
+            raise ValueError("Model has not been loaded. Call load_model() first.")
+
         inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
-        
+
         with torch.no_grad():
             outputs = self.model(**inputs, output_hidden_states=True)
-        
-        return outputs.hidden_states[layer].squeeze(0)  # (seq_len, hidden_dim)
+
+        hs = outputs.hidden_states
+        if hs is None:
+            raise RuntimeError("Model did not return hidden states despite output_hidden_states=True.")
+
+        # HF models return hidden_states with length n_layers+1, where index 0
+        # is the embedding output and index i+1 corresponds to transformer block i.
+        try:
+            n_blocks = len(self.model.model.layers)
+        except Exception:
+            n_blocks = None
+
+        if n_blocks is not None and len(hs) == n_blocks + 1:
+            idx = layer + 1
+        else:
+            idx = layer
+
+        if not (0 <= idx < len(hs)):
+            raise ValueError(
+                f"Requested layer {layer} (mapped to hidden_states[{idx}]) is out of range "
+                f"for hidden_states length {len(hs)}."
+            )
+
+        h = hs[idx].squeeze(0)  # (seq_len, hidden_dim)
+        # Handle single-token case: ensure 2D output
+        if h.dim() == 1:
+            h = h.unsqueeze(0)  # (1, hidden_dim)
+        return h
     
     def get_sae_activations(self, text: str, layer: int):
         """Get SAE feature activations for text at layer.
@@ -168,9 +258,10 @@ class GemmaWithSAE:
             max_new_tokens: Maximum tokens to generate
             
         Returns:
-            Generated text (including prompt)
+            Generated completion text (excluding prompt)
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        prompt_len = int(inputs["input_ids"].shape[1])
         
         with torch.no_grad():
             out = self.model.generate(
@@ -179,8 +270,9 @@ class GemmaWithSAE:
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-        
-        return self.tokenizer.decode(out[0], skip_special_tokens=True)
+
+        gen_ids = out[0][prompt_len:]
+        return self.tokenizer.decode(gen_ids, skip_special_tokens=True)
     
     def generate_with_steering(
         self, 
@@ -188,7 +280,9 @@ class GemmaWithSAE:
         layer: int, 
         steering_vector: torch.Tensor, 
         strength: float,
-        max_new_tokens: int = 50
+        max_new_tokens: int = 50,
+        schedule: str | None = None,
+        decay: float = 0.9,
     ) -> str:
         """Generate with steering vector added at layer.
         
@@ -198,9 +292,15 @@ class GemmaWithSAE:
             steering_vector: Direction to steer (shape: hidden_dim)
             strength: Multiplier for steering
             max_new_tokens: Maximum tokens to generate
+            schedule: Steering schedule for when to apply the vector.
+                - "constant": apply on all forward passes (default)
+                - "prompt_only": apply only when processing the prompt
+                - "generation_only": apply only during token-by-token generation (CAA-style)
+                - "exp_decay": apply during generation with exponential decay per token
+            decay: Exponential decay factor for "exp_decay" schedule.
             
         Returns:
-            Generated text (including prompt)
+            Generated completion text (excluding prompt)
         """
         if self.model is None:
             raise ValueError("Base model has not been loaded. Call load_model() first.")
@@ -221,8 +321,18 @@ class GemmaWithSAE:
                 f"(valid: 0–{num_layers-1})."
             )
 
-        # Optional but cheap sanity check: ensure the steering vector matches
-        # the model's hidden size so that broadcasting behaves as intended.
+        # Steering vector must be 1D for correct broadcasting in the hook.
+        # Flatten if needed (e.g., (1, hidden) -> (hidden,)), but error if multi-row.
+        if steering_vector.dim() > 1:
+            if steering_vector.shape[0] == 1:
+                steering_vector = steering_vector.squeeze(0)
+            else:
+                raise ValueError(
+                    f"steering_vector must be 1D or (1, hidden_dim), got shape {steering_vector.shape}. "
+                    "Cannot broadcast multi-row steering vectors."
+                )
+
+        # Sanity check: ensure the steering vector matches the model's hidden size
         expected_dim = getattr(self.model.config, "hidden_size", None)
         if expected_dim is not None and steering_vector.shape[-1] != expected_dim:
             raise ValueError(
@@ -230,27 +340,66 @@ class GemmaWithSAE:
                 f"but model.hidden_size={expected_dim}."
             )
 
-        # Check for zero or near-zero steering vector (silent failure risk)
-        if torch.norm(steering_vector.float()) < 1e-6:
-            import warnings
-            warnings.warn(
-                "Steering vector has near-zero norm. "
-                "Generation will proceed without effective steering."
+        # Check for zero or near-zero steering vector (would cause silent failure)
+        steering_norm = torch.norm(steering_vector.float()).item()
+        if steering_norm < 1e-6:
+            raise ValueError(
+                f"Steering vector has near-zero norm ({steering_norm:.2e}). "
+                "Cannot proceed with steering - check feature selection or normalization."
             )
 
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        prompt_len = int(inputs["input_ids"].shape[1])
         
-        # Ensure steering vector is on correct device; dtype is aligned with
+        # Ensure steering vector is on correct device and detached from any
+        # computation graph to avoid gradient leakage; dtype is aligned with
         # the hidden states inside the hook.
-        steering_vector = steering_vector.to(self.device)
+        steering_vector = steering_vector.detach().to(self.device)
+
+        # Allow overriding steering schedule via env var without changing
+        # experiment code.
+        if schedule is None:
+            schedule = os.environ.get("STEERING_SCHEDULE", "constant")
+        schedule = str(schedule).strip().lower()
+        if "STEERING_DECAY" in os.environ:
+            try:
+                decay = float(os.environ["STEERING_DECAY"])
+            except ValueError:
+                pass
+
+        gen_step = 0
         
         def hook(module, input, output):
             """Add steering to hidden states during forward pass."""
+            nonlocal gen_step
             hidden = output[0] if isinstance(output, tuple) else output
-            # Work in the same dtype as the hidden states to avoid
-            # float/bfloat16 mismatches downstream.
-            steer_vec = steering_vector.to(hidden.dtype)
-            steered = hidden + strength * steer_vec.unsqueeze(0).unsqueeze(0)
+            # Work in the same dtype and device as the hidden states to avoid
+            # float/bfloat16 mismatches and CUDA device errors.
+            steer_vec = steering_vector.to(dtype=hidden.dtype, device=hidden.device)
+
+            seq_len = int(hidden.shape[1])
+            apply = True
+            local_strength = strength
+
+            if schedule == "prompt_only":
+                apply = seq_len > 1
+            elif schedule in ("generation_only", "gen_only"):
+                apply = seq_len == 1
+            elif schedule in ("exp_decay", "decay"):
+                apply = seq_len == 1
+                if apply:
+                    local_strength = strength * (decay ** gen_step)
+                    gen_step += 1
+            elif schedule == "constant":
+                apply = True
+            else:
+                # Unknown schedule: default to constant to avoid silent no-op.
+                apply = True
+
+            if not apply:
+                return output
+
+            steered = hidden + local_strength * steer_vec.unsqueeze(0).unsqueeze(0)
             return (steered,) + output[1:] if isinstance(output, tuple) else steered
         
         # Register hook on target layer
@@ -264,7 +413,8 @@ class GemmaWithSAE:
                     do_sample=False,
                     pad_token_id=self.tokenizer.eos_token_id,
                 )
-            return self.tokenizer.decode(out[0], skip_special_tokens=True)
+            gen_ids = out[0][prompt_len:]
+            return self.tokenizer.decode(gen_ids, skip_special_tokens=True)
         finally:
             # Always remove hook
             handle.remove()

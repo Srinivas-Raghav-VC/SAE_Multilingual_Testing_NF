@@ -28,21 +28,23 @@ from config import (
     N_SAMPLES_DISCOVERY,
     STEERING_STRENGTHS,
     EVAL_PROMPTS,
-    MODEL_ID,
+    MODEL_ID_2B,
     MODEL_ID_9B,
     SAE_RELEASE_2B,
     SAE_RELEASE_9B,
     SAE_WIDTH_2B,
     SAE_WIDTH_9B,
     EXTENDED_LANGUAGES,
+    SEED,
 )
-from data import load_flores
+from data import load_flores, load_steering_prompts
 from model import GemmaWithSAE
-from experiments.exp2_steering import (
+from steering_utils import (
     construct_sae_steering_vector,
     construct_dense_steering_vector,
 )
 from evaluation_comprehensive import evaluate_steering_output, aggregate_results
+from reproducibility import seed_everything
 
 
 @dataclass
@@ -85,7 +87,7 @@ def simple_hi_steering_eval(
     prompts: List[str],
 ) -> Dict[str, Dict]:
     """Evaluate dense vs SAE steering for EN→HI at one layer."""
-    from experiments.exp2_steering import get_activation_diff_features
+    from steering_utils import get_activation_diff_features
 
     results: Dict[str, Dict] = {}
 
@@ -118,12 +120,15 @@ def simple_hi_steering_eval(
             "success_rate": agg.success_rate,
             "avg_target_script_ratio": agg.avg_target_script_ratio,
             "degradation_rate": agg.degradation_rate,
+            "sensitivity": agg.sensitivity,
+            "separate_metrics": agg.separate_metrics.to_dict() if agg.separate_metrics else None,
         }
 
     return results
 
 
 def main():
+    seed_everything(SEED)
     print("=" * 60)
     print("EXPERIMENT 8: Scaling to 9B and Low-Resource Languages")
     print("=" * 60)
@@ -131,7 +136,7 @@ def main():
     # Two model variants: 2B (default) and 9B (if available)
     # Note: 9B SAEs may have different layer configurations than 2B
     model_variants = [
-        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID, sae_release=SAE_RELEASE_2B, sae_width=SAE_WIDTH_2B),
+        ModelConfig(name="gemma-2-2b", model_id=MODEL_ID_2B, sae_release=SAE_RELEASE_2B, sae_width=SAE_WIDTH_2B),
         ModelConfig(name="gemma-2-9b", model_id=MODEL_ID_9B, sae_release=SAE_RELEASE_9B, sae_width=SAE_WIDTH_9B),
     ]
 
@@ -162,13 +167,17 @@ def main():
         print("ERROR: Need English and Hindi data for steering comparison.")
         return
 
-    # Use at least 50 prompts for statistically meaningful steering comparisons
-    # (increased from 10 for research rigor)
-    prompts = EVAL_PROMPTS[:50] if len(EVAL_PROMPTS) >= 50 else EVAL_PROMPTS
+    # Use a shared, sufficiently large prompt pool. This avoids underpowered
+    # comparisons when EVAL_PROMPTS is short (25 items).
+    prompts = load_steering_prompts(min_prompts=100)[:100]
 
-    # Use a few representative layers
-    layers_to_test = [l for l in TARGET_LAYERS if l in {5, 13, 20, 24}]
-    if not layers_to_test:
+    # Use a few representative layers at comparable relative depth.
+    # TARGET_LAYERS is model-matched via USE_9B, so we can safely subsample.
+    if TARGET_LAYERS:
+        mid_layer = TARGET_LAYERS[len(TARGET_LAYERS) // 2]
+        late_layer = TARGET_LAYERS[-1]
+        layers_to_test = sorted({mid_layer, late_layer})
+    else:
         layers_to_test = [13]
 
     all_results = {}
@@ -235,6 +244,19 @@ def main():
             model_results["steering"][str(layer)] = steering
 
         all_results[cfg.name] = model_results
+
+        # Important for shared-GPU setups: explicitly free the current model and
+        # SAE cache before loading the next variant. Relying on Python GC can
+        # keep VRAM allocated and cause OOM when switching 2B -> 9B.
+        if torch.cuda.is_available() and getattr(model, "device", "") == "cuda":
+            try:
+                model.saes.clear()
+            except Exception:
+                pass
+            del model
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
 
     # Save results
     out_dir = Path("results")

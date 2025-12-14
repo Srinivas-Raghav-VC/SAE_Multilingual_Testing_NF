@@ -34,50 +34,84 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from typing import Dict, List
 import json
+import os
 
 import torch
 import numpy as np
 from tqdm import tqdm
 
-from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY
+from config import TARGET_LAYERS, N_SAMPLES_DISCOVERY, SEED
 from data import load_flores
 from model import GemmaWithSAE
+from reproducibility import seed_everything
 
 
 LANGS = ["en", "hi", "ur", "bn", "ta", "te"]
 
 
-def compute_sentence_embeddings(
+def compute_sentence_embeddings_all_layers(
     model: GemmaWithSAE,
     texts_by_lang: Dict[str, List[str]],
-    layer: int,
+    layers: List[int],
     max_sentences: int,
-) -> Dict[str, torch.Tensor]:
-    """Compute mean-pooled sentence embeddings for each language at a layer.
+) -> Dict[int, Dict[str, torch.Tensor]]:
+    """Compute mean-pooled sentence embeddings for each language at multiple layers.
+
+    This is significantly cheaper than recomputing embeddings separately for
+    each layer: for each FLORES sentence we do one forward pass and collect the
+    mean-pooled hidden states for all requested layers.
 
     Returns:
-        Dict lang -> tensor of shape (N, d_model) with N <= max_sentences
+        Dict layer -> (Dict lang -> tensor of shape (N, d_model))
         aligned across languages (same indices = same FLORES sentence).
     """
-    # Determine N: min length across languages so sentences align
     lengths = {lang: len(texts) for lang, texts in texts_by_lang.items()}
     n = min(min(lengths.values()), max_sentences)
     if n == 0:
         raise ValueError("No sentences available for some languages.")
 
-    embeddings: Dict[str, List[torch.Tensor]] = {lang: [] for lang in LANGS}
+    emb_lists: Dict[int, Dict[str, List[torch.Tensor]]] = {
+        layer: {lang: [] for lang in LANGS} for layer in layers
+    }
 
-    for i in tqdm(range(n), desc=f"Layer {layer} embeddings", leave=False):
+    # Determine hidden_states indexing convention once.
+    try:
+        n_blocks = len(model.model.model.layers)  # type: ignore[attr-defined]
+    except Exception:
+        n_blocks = None
+
+    for i in tqdm(range(n), desc="FLORES sentence embeddings", leave=False):
         for lang in LANGS:
             text = texts_by_lang[lang][i]
-            h = model.get_hidden_states(text, layer)  # (seq_len, d_model)
-            sent_emb = h.mean(dim=0)  # (d_model,)
-            embeddings[lang].append(sent_emb.detach().cpu())
+            inputs = model.tokenizer(text, return_tensors="pt").to(model.device)
+            with torch.no_grad():
+                outputs = model.model(**inputs, output_hidden_states=True)
+            hs = outputs.hidden_states
+            if hs is None:
+                raise RuntimeError("Model did not return hidden_states.")
 
-    # Stack into (N, d_model)
-    emb_tensors = {
-        lang: torch.stack(vecs, dim=0) for lang, vecs in embeddings.items()
-    }
+            # HF convention: hidden_states[0] is embedding output and
+            # hidden_states[layer+1] corresponds to transformer block `layer`.
+            if n_blocks is not None and len(hs) == n_blocks + 1:
+                base = 1
+            else:
+                base = 0
+
+            for layer in layers:
+                idx = layer + base
+                if not (0 <= idx < len(hs)):
+                    raise ValueError(
+                        f"Requested layer {layer} (mapped to hidden_states[{idx}]) "
+                        f"out of range for hidden_states length {len(hs)}."
+                    )
+                h = hs[idx].squeeze(0)  # (seq, d_model)
+                if h.dim() == 1:
+                    h = h.unsqueeze(0)
+                emb_lists[layer][lang].append(h.mean(dim=0).detach().cpu())
+
+    emb_tensors: Dict[int, Dict[str, torch.Tensor]] = {}
+    for layer in layers:
+        emb_tensors[layer] = {lang: torch.stack(v, dim=0) for lang, v in emb_lists[layer].items()}
     return emb_tensors
 
 
@@ -108,6 +142,7 @@ def compute_pairwise_cosine(
 
 
 def main():
+    seed_everything(SEED)
     print("=" * 60)
     print("EXPERIMENT 14: Layer-wise Cross-Lingual Alignment")
     print("=" * 60)
@@ -116,10 +151,13 @@ def main():
     # Load model
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
 
     # Load FLORES data for selected languages
     print("Loading FLORES-200 parallel data...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
+    # Use FLORES dev for representation analysis to avoid overlapping with
+    # devtest prompts used elsewhere for evaluation augmentation.
+    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, split="dev")
     texts_by_lang = {lang: flores.get(lang, []) for lang in LANGS}
 
     # Basic sanity check
@@ -141,7 +179,10 @@ def main():
             f"but got lengths={lengths}"
         )
 
-    max_sentences = min(500, N_SAMPLES_DISCOVERY)
+    # Default to a moderate N to keep this experiment feasible on shared GPUs.
+    # Set N_ALIGNMENT_SENTENCES to increase/decrease.
+    max_sentences = int(os.environ.get("N_ALIGNMENT_SENTENCES", "200"))
+    max_sentences = max(10, min(max_sentences, 500, N_SAMPLES_DISCOVERY))
 
     results = {
         "languages": LANGS,
@@ -149,20 +190,23 @@ def main():
         "layers": {},
     }
 
-    for layer in TARGET_LAYERS:
-        print(f"\n--- Layer {layer} ---")
-        emb_tensors = compute_sentence_embeddings(
-            model, texts_by_lang, layer, max_sentences=max_sentences
-        )
-        pairwise = compute_pairwise_cosine(emb_tensors)
-        results["layers"][str(layer)] = {
-            "pairwise_cosine": pairwise,
-        }
-        print("  Example EN-HI cosine:", pairwise.get("en-hi", None))
+    layers = list(TARGET_LAYERS)
+    print(f"Computing embeddings for layers={layers} ...")
+    emb_by_layer = compute_sentence_embeddings_all_layers(
+        model,
+        texts_by_lang,
+        layers=layers,
+        max_sentences=max_sentences,
+    )
+
+    for layer in layers:
+        pairwise = compute_pairwise_cosine(emb_by_layer[layer])
+        results["layers"][str(layer)] = {"pairwise_cosine": pairwise}
+        print(f"  Layer {layer}: Example EN-HI cosine:", pairwise.get("en-hi", None))
 
     out_dir = Path("results")
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / "exp14_language_agnostic_space.json"
+    out_path = out_dir / f"exp14_language_agnostic_space{suffix}.json"
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
 

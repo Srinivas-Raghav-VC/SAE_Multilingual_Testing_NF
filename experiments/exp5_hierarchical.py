@@ -34,11 +34,12 @@ import numpy as np
 
 from config import (
     TARGET_LAYERS, N_SAMPLES_DISCOVERY, LANGUAGES,
-    MONOLINGUALITY_THRESHOLD, GOOGLE_API_KEY
+    MONOLINGUALITY_THRESHOLD, GOOGLE_API_KEY, SEED
 )
 from data import load_flores
 from model import GemmaWithSAE
 from evaluation_comprehensive import jaccard_overlap
+from reproducibility import seed_everything
 
 
 @dataclass
@@ -98,13 +99,16 @@ def compute_layer_analysis(
             acts = model.get_sae_activations(text, layer)
             activation_counts += (acts > 0).float().sum(dim=0)
             total_tokens += acts.shape[0]
-        
-        rates = activation_counts / total_tokens
+        if total_tokens == 0:
+            print(f"    [exp5] Warning: total_tokens==0 for {lang} at layer {layer}; treating as no active features.")
+            rates = torch.zeros_like(activation_counts)
+        else:
+            rates = activation_counts / total_tokens
         language_rates[lang] = rates.cpu().numpy()
         
         # Features active for this language
         active_mask = rates > activation_threshold
-        active_indices = set(active_mask.nonzero().squeeze(-1).tolist())
+        active_indices = set(int(i) for i in active_mask.nonzero(as_tuple=False).flatten().tolist())
         language_features[lang] = active_indices
         
         print(f"    {lang}: {len(active_indices)} active features")
@@ -127,7 +131,8 @@ def compute_layer_analysis(
         shared_features = set()
     
     # Identify Indic-specific features
-    indic_langs = {"hi", "ur", "bn", "ta", "te"}
+    # Include all Indic languages: Indo-Aryan (hi, ur, bn) + Dravidian (ta, te, kn, ml)
+    indic_langs = {"hi", "ur", "bn", "ta", "te", "kn", "ml"}
     other_langs = set(langs) - indic_langs
     
     indic_only = set.union(*[language_features.get(l, set()) for l in indic_langs if l in language_features])
@@ -379,6 +384,7 @@ def create_hierarchy_visualization_data(
 
 def main():
     """Run hierarchical language representation analysis."""
+    seed_everything(SEED)
     print("=" * 60)
     print("EXPERIMENT 5: Hierarchical Language Representation")
     print("=" * 60)
@@ -387,13 +393,17 @@ def main():
     print("\nLoading model...")
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
     
     # Load data
     print("Loading FLORES-200...")
-    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY)
+    # Use FLORES dev for representation analysis; devtest is reserved for
+    # held-out evaluation prompts in steering experiments.
+    flores = load_flores(max_samples=N_SAMPLES_DISCOVERY, split="dev")
     
     # Select languages for analysis
-    analysis_langs = ["en", "hi", "ur", "bn", "ta", "de"]
+    # Include all 4 Dravidian languages (ta, te, kn, ml) for complete Indic cluster analysis
+    analysis_langs = ["en", "hi", "ur", "bn", "ta", "te", "kn", "ml", "de"]
     texts_by_lang = {lang: flores.get(lang, []) for lang in analysis_langs if lang in flores}
     
     print(f"Languages: {list(texts_by_lang.keys())}")
@@ -509,10 +519,11 @@ def main():
         ],
     }
     
-    with open(output_dir / "exp5_hierarchical_analysis.json", "w") as f:
+    out_path = output_dir / f"exp5_hierarchical_analysis{suffix}.json"
+    with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
     
-    print(f"\n✓ Results saved to {output_dir / 'exp5_hierarchical_analysis.json'}")
+    print(f"\n✓ Results saved to {out_path}")
     
     # Print interpretation
     print("\n" + "=" * 60)

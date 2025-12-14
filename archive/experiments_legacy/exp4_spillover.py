@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import os
 import torch
 import json
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple
 from collections import defaultdict
@@ -26,6 +28,7 @@ import re
 
 from config import (
     TARGET_LAYERS,
+    LAYER_RANGES,
     STEERING_STRENGTHS,
     NUM_FEATURES,
     EVAL_PROMPTS,
@@ -35,6 +38,11 @@ from config import (
 )
 from data import load_flores, load_research_data
 from model import GemmaWithSAE
+from evaluation_comprehensive import (
+    detect_language,
+    get_language_with_confidence,
+    LID_CONFIDENCE_THRESHOLD,
+)
 
 
 @dataclass
@@ -46,6 +54,11 @@ class SpilloverResult:
     num_features: int
     language_distribution: Dict[str, float]  # Lang -> % of outputs
     n_samples: int
+    # LID confidence metrics
+    confidence_mean: float = 0.0
+    confidence_std: float = 0.0
+    n_reliable: int = 0  # Count of samples with confidence >= threshold
+    n_unreliable: int = 0  # Count of low-confidence detections
 
 
 @dataclass  
@@ -100,30 +113,13 @@ def script_to_language(script: str) -> str:
 
 
 def detect_language_detailed(text: str) -> str:
-    """More detailed language detection using script + patterns."""
-    primary_script = detect_script(text)
-    
-    # For Latin script, try to distinguish languages
-    if primary_script == "latin":
-        # Check for German-specific patterns
-        german_patterns = r'\b(der|die|das|und|ist|ein|eine|ich|nicht)\b'
-        spanish_patterns = r'\b(el|la|los|las|es|una|que|por|para)\b'
-        french_patterns = r'\b(le|la|les|de|est|un|une|que|pour)\b'
-        
-        if re.search(german_patterns, text.lower()):
-            return "de"
-        elif re.search(spanish_patterns, text.lower()):
-            return "es"
-        elif re.search(french_patterns, text.lower()):
-            return "fr"
-        else:
-            return "en"  # Default to English for Latin
-    
-    # For Arabic script, default to Urdu (since we're testing Hindi steering)
-    if primary_script == "arabic":
-        return "ur"
-    
-    return script_to_language(primary_script).split("_")[0]
+    """Language detection wrapper.
+
+    We delegate to the shared evaluator's detect_language() so Exp4 uses
+    the same script dominance and Latin-language heuristics as Exp9/12.
+    """
+    lang, _conf = detect_language(text)
+    return lang
 
 
 LANGUAGE_FAMILIES = {
@@ -183,7 +179,7 @@ def compute_steering_vector(model, texts_target, texts_source, layer):
     # vector here would silently disable steering and produce 100% English
     # outputs, which is exactly the suspicious pattern we want to avoid.
     if (diff_clamped > 0).sum() == 0:
-        from experiments.exp2_steering import construct_dense_steering_vector
+        from steering_utils import construct_dense_steering_vector
 
         print(
             "[exp4] Warning: no positive activation-diff features found at "
@@ -218,24 +214,30 @@ def run_spillover_experiment(
     target_lang: str = "hi"
 ) -> Dict[float, SpilloverResult]:
     """Run steering at different strengths (or None for baseline), measure language distribution.
-    
+
     Args:
         model: GemmaWithSAE model
-        steering_vector_features: Steering vector in SAE FEATURE space (16384 dims)
+        steering_vector_hidden: Steering vector in hidden space
         layer: Layer to steer
         prompts: Prompts to test
         strengths: Steering strengths
         target_lang: Target language code
+
+    Returns:
+        Dict mapping strength -> SpilloverResult with confidence-aware metrics
     """
     results = {}
-    
+
     # Test each strength (including 0.0 for baseline)
     test_strengths = [0.0] + list(strengths)
-    
+
     for strength in test_strengths:
         print(f"\n  Testing strength {strength}...")
         lang_counts = defaultdict(int)
-        
+        confidences = []
+        n_reliable = 0
+        n_unreliable = 0
+
         for prompt in prompts:
             if strength == 0.0:
                 # Baseline: no steering
@@ -245,30 +247,46 @@ def run_spillover_experiment(
                 output = model.generate_with_steering(
                     prompt, layer, steering_vector_hidden, strength
                 )
-            
-            # Detect output language
-            detected_lang = detect_language_detailed(output)
+
+            # Detect output language WITH confidence
+            detected_lang, conf, is_reliable = get_language_with_confidence(output)
             lang_counts[detected_lang] += 1
-        
+            confidences.append(conf)
+
+            if is_reliable:
+                n_reliable += 1
+            else:
+                n_unreliable += 1
+
         # Convert to percentages
         total = len(prompts)
         lang_distribution = {
             lang: count / total * 100
             for lang, count in lang_counts.items()
         }
-        
+
+        # Compute confidence statistics
+        conf_mean = float(np.mean(confidences)) if confidences else 0.0
+        conf_std = float(np.std(confidences)) if confidences else 0.0
+
         results[strength] = SpilloverResult(
             target_lang=target_lang,
             layer=layer,
             strength=strength,
             num_features=NUM_FEATURES,
             language_distribution=lang_distribution,
-            n_samples=total
+            n_samples=total,
+            confidence_mean=conf_mean,
+            confidence_std=conf_std,
+            n_reliable=n_reliable,
+            n_unreliable=n_unreliable,
         )
-        
-        # Print summary
+
+        # Print summary with confidence info
+        reliable_pct = 100 * n_reliable / total if total > 0 else 0
         print(f"    Results: {dict(lang_distribution)}")
-    
+        print(f"    LID confidence: {conf_mean:.2f} ± {conf_std:.2f}, reliable: {reliable_pct:.0f}%")
+
     return results
 
 
@@ -354,6 +372,7 @@ def main():
     print("\nLoading model...")
     model = GemmaWithSAE()
     model.load_model()
+    suffix = "_9b" if "9b" in str(getattr(model, "model_id", "")).lower() else ""
     
     # Load data using the unified research loader so that training
     # sentences (for steering vectors) and evaluation prompts are
@@ -362,6 +381,14 @@ def main():
     data_split = load_research_data()
     train_data = data_split.train
     prompts = data_split.steering_prompts
+
+    lid_backend = os.environ.get("LID_BACKEND", "regex").strip().lower()
+    if lid_backend != "fasttext":
+        print(
+            "[exp4] Note: LID_BACKEND is not 'fasttext'. "
+            "Latin/Arabic-script outputs may be misclassified by lightweight heuristics. "
+            "For shared-script controls, prefer LID_BACKEND=fasttext."
+        )
 
     texts_hi = train_data.get("hi", [])
     texts_de = train_data.get("de", [])
@@ -380,8 +407,17 @@ def main():
     
     all_results = {"en_to_hi": {}, "en_to_de": {}}
     
-    # Test at different layers for both EN→HI and EN→DE
-    test_layers = [13, 20]  # Mid and late layers
+    # Test at representative middle and late layers for both EN→HI and EN→DE.
+    # We pull these from LAYER_RANGES so 9B runs probe comparable relative depth.
+    try:
+        mid_layer = LAYER_RANGES.get("middle", [TARGET_LAYERS[len(TARGET_LAYERS)//2]])[1]
+    except Exception:
+        mid_layer = TARGET_LAYERS[len(TARGET_LAYERS)//2]
+    try:
+        late_layer = LAYER_RANGES.get("late", [TARGET_LAYERS[-1]])[1]
+    except Exception:
+        late_layer = TARGET_LAYERS[-1]
+    test_layers = [mid_layer, late_layer]
     
     for layer in test_layers:
         print(f"\n{'='*20} Layer {layer} {'='*20}")
@@ -454,13 +490,20 @@ def main():
     output_dir = Path("results")
     output_dir.mkdir(exist_ok=True)
     
-    # Convert to JSON-serializable format
+    # Convert to JSON-serializable format with confidence metrics
     json_results = {
+        "lid_backend": lid_backend,
+        "lid_confidence_threshold": LID_CONFIDENCE_THRESHOLD,
         "en_to_hi_layers": {
             str(layer): {
                 str(strength): {
                     "language_distribution": result.language_distribution,
                     "n_samples": result.n_samples,
+                    "lid_confidence_mean": result.confidence_mean,
+                    "lid_confidence_std": result.confidence_std,
+                    "n_reliable_detections": result.n_reliable,
+                    "n_unreliable_detections": result.n_unreliable,
+                    "reliability_rate": result.n_reliable / result.n_samples if result.n_samples > 0 else 0,
                 }
                 for strength, result in layer_results.items()
             }
@@ -471,6 +514,11 @@ def main():
                 str(strength): {
                     "language_distribution": result.language_distribution,
                     "n_samples": result.n_samples,
+                    "lid_confidence_mean": result.confidence_mean,
+                    "lid_confidence_std": result.confidence_std,
+                    "n_reliable_detections": result.n_reliable,
+                    "n_unreliable_detections": result.n_unreliable,
+                    "reliability_rate": result.n_reliable / result.n_samples if result.n_samples > 0 else 0,
                 }
                 for strength, result in layer_results.items()
             }
@@ -481,10 +529,11 @@ def main():
         "family_analysis_en_to_de": analyze_spillover_by_family(all_results["en_to_de"][test_layer]),
     }
     
-    with open(output_dir / "exp4_spillover.json", "w") as f:
+    out_path = output_dir / f"exp4_spillover{suffix}.json"
+    with open(out_path, "w") as f:
         json.dump(json_results, f, indent=2)
     
-    print(f"\n✓ Results saved to {output_dir / 'exp4_spillover.json'}")
+    print(f"\n✓ Results saved to {out_path}")
     
     return all_results
 

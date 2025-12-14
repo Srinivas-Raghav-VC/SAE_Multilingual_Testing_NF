@@ -33,12 +33,9 @@ from typing import Tuple
 # Mapping: flag -> description
 LIGHT_EXPERIMENTS = [
     ("--exp1", "exp1_feature_discovery"),
-    ("--exp2", "exp2_steering_comparison"),
     ("--exp3", "exp3_hindi_urdu_overlap"),
-    ("--exp4", "exp4_spillover"),
+    # NOTE: exp4, exp6 archived to archive/experiments_legacy/
     ("--exp5", "exp5_hierarchical"),
-    ("--exp6", "exp6_script_semantics_controls"),
-    ("--exp7", "exp7_causal_feature_probing"),
     ("--exp11", "exp11_judge_calibration"),
 ]
 
@@ -48,16 +45,19 @@ HEAVY_EXPERIMENTS = [
     ("--exp9", "exp9_layer_sweep_steering"),
     ("--exp10", "exp10_attribution_occlusion"),
     ("--exp14", "exp14_language_agnostic_space"),
-    ("--exp15", "exp15_directional_symmetry"),
-    ("--exp16", "exp16_code_mix_robustness"),
     ("--exp12", "exp12_qa_degradation"),
     ("--exp13", "exp13_script_semantic_ablation"),
 ]
 
 # How much free GPU memory (in MiB) we want before we consider the GPU "free
 # enough" for an experiment.
-LIGHT_GPU_THRESHOLD_MB = 8000   # if less than this, run light exps on CPU
-HEAVY_GPU_THRESHOLD_MB = 20000  # heavy exps wait until at least this much free
+#
+# These defaults are deliberately conservative for shared A100-40GB servers.
+# Override with env vars if you know what you're doing:
+#   LIGHT_GPU_THRESHOLD_MB=...
+#   HEAVY_GPU_THRESHOLD_MB=...
+LIGHT_GPU_THRESHOLD_MB = int(os.environ.get("LIGHT_GPU_THRESHOLD_MB", "8000"))
+HEAVY_GPU_THRESHOLD_MB = int(os.environ.get("HEAVY_GPU_THRESHOLD_MB", "30000"))
 
 # How long to sleep (seconds) between GPU checks for heavy experiments.
 POLL_INTERVAL_SEC = 120
@@ -68,11 +68,22 @@ POLL_INTERVAL_SEC = 120
 # ---------------------------------------------------------------------------
 
 def gpu_free_memory_mb() -> Tuple[bool, int]:
-    """Return (ok, free_mem_mb) using nvidia-smi.
+    """Return (ok, free_mem_mb) using torch (preferred) or nvidia-smi.
 
     If nvidia-smi is not available or something goes wrong, returns (False, 0).
     """
     try:
+        # Prefer torch-based reporting: avoids brittle parsing and works in
+        # many container/MIG setups where nvidia-smi may be restricted.
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                free_b, _total_b = torch.cuda.mem_get_info()
+                return True, int(free_b / (1024 * 1024))
+        except Exception:
+            pass
+
         # First try a modern nvidia-smi invocation (no units in output).
         cmds = [
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
@@ -94,21 +105,14 @@ def gpu_free_memory_mb() -> Tuple[bool, int]:
                 token = line.strip().split()[0]
                 try:
                     free_mb = int(token)
+                    return True, free_mb
                 except ValueError:
-                    # Some institutional setups print messages like
-                    # "[Insufficient Permissions]" instead of a number even
-                    # though nvidia-smi is present. In that case, we assume
-                    # that a GPU exists but we cannot read its free memory.
-                    # To avoid forcing everything onto CPU, treat this as
-                    # "GPU available with unknown free memory" and return a
-                    # large sentinel value.
                     sys.stderr.write(
                         f"[smart_run] Could not parse free memory token '{token}'. "
-                        "Assuming GPU is present but free memory is unknown; "
-                        "treating as sufficiently free.\n"
+                        "Treating GPU free memory as unknown/unreadable; "
+                        "will fall back to CPU for light runs and avoid waiting.\n"
                     )
-                    return True, 10**9
-                return True, free_mb
+                    return False, 0
 
         # If we get here, all invocations failed.
         sys.stderr.write(
@@ -144,6 +148,10 @@ def run_experiment(flag: str, name: str, use_gpu: bool) -> bool:
     log_path = logs_dir / f"{name}_{ts}.log"
 
     env = os.environ.copy()
+    # Default to CPU for semantic model to avoid VRAM contention with Gemma.
+    env.setdefault("SEMANTIC_DEVICE", "cpu")
+    # Cap SAE cache unless the user explicitly overrides it.
+    env.setdefault("SAE_CACHE_SIZE", "2")
     if not use_gpu:
         # Force CPU for this subprocess
         env["CUDA_VISIBLE_DEVICES"] = ""

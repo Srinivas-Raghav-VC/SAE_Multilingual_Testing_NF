@@ -123,6 +123,11 @@ def bootstrap_ci(
 
     if n == 1:
         val = float(data[0])
+        warnings.warn(
+            "bootstrap_ci called with n==1; returning a degenerate CI (ci_low==ci_high) "
+            "which should not be interpreted as statistical certainty.",
+            RuntimeWarning,
+        )
         return BootstrapResult(
             estimate=val, ci_low=val, ci_high=val,
             std_error=0.0, n_samples=1, n_bootstrap=n_bootstrap,
@@ -175,6 +180,18 @@ def bootstrap_difference_ci(
     """
     data1 = np.asarray(data1)
     data2 = np.asarray(data2)
+
+    # Handle empty inputs gracefully
+    if len(data1) == 0 or len(data2) == 0:
+        return BootstrapResult(
+            estimate=float('nan'),
+            ci_low=float('nan'),
+            ci_high=float('nan'),
+            std_error=float('nan'),
+            n_samples=len(data1) + len(data2),
+            n_bootstrap=n_bootstrap,
+            confidence_level=confidence_level,
+        )
 
     rng = np.random.RandomState(seed)
 
@@ -426,10 +443,18 @@ def wilcoxon_test(
             interpretation=f"test failed: {e}"
         )
 
-    # Effect size: rank-biserial correlation
-    # r = 1 - (4 * W) / (n * (n + 1)) where W is the smaller of W+ and W-
+    # Effect size: signed rank-biserial correlation for Wilcoxon signed-rank.
+    #
+    # Compute W+ and W- directly from ranks of |diff| (excluding zeros), then:
+    #   r = (W+ - W-) / (n(n+1)/2)
+    #
+    # This yields r in [-1, 1] where positive means group1 > group2.
     n_nonzero = len(nonzero_diff)
-    r = 1 - (4 * stat) / (n_nonzero * (n_nonzero + 1))
+    ranks = stats.rankdata(np.abs(nonzero_diff))
+    w_pos = float(ranks[nonzero_diff > 0].sum())
+    w_neg = float(ranks[nonzero_diff < 0].sum())
+    denom = float(n_nonzero * (n_nonzero + 1) / 2.0)
+    r = 0.0 if denom == 0 else float((w_pos - w_neg) / denom)
 
     ci = bootstrap_ci(diff, np.median)
 
@@ -438,7 +463,7 @@ def wilcoxon_test(
         statistic=float(stat),
         p_value=float(p_value),
         effect_size=float(r),
-        effect_size_name="rank-biserial r",
+        effect_size_name="rank-biserial r (signed)",
         ci_low=ci.ci_low,
         ci_high=ci.ci_high,
         n1=n,
@@ -579,6 +604,18 @@ def bonferroni_correction(p_values: List[float], alpha: float = 0.05) -> Dict:
     and Type I error control is critical.
     """
     n = len(p_values)
+
+    # Handle empty input
+    if n == 0:
+        return {
+            "method": "bonferroni",
+            "original_p_values": [],
+            "adjusted_p_values": [],
+            "adjusted_alpha": alpha,
+            "significant": [],
+            "n_comparisons": 0,
+        }
+
     adjusted_alpha = alpha / n
 
     adjusted_p = [min(p * n, 1.0) for p in p_values]
@@ -606,13 +643,18 @@ def holm_bonferroni_correction(p_values: List[float], alpha: float = 0.05) -> Di
     adjusted_p = np.zeros(n)
     significant = [False] * n
 
-    for i, idx in enumerate(sorted_indices):
-        adjusted_p[idx] = min(sorted_p[i] * (n - i), 1.0)
+    # Calculate raw adjusted p-values (step-down)
+    raw_adjusted = np.zeros(n)
+    for i in range(n):
+        raw_adjusted[i] = min(sorted_p[i] * (n - i), 1.0)
 
-        # Ensure monotonicity
-        if i > 0:
-            prev_idx = sorted_indices[i - 1]
-            adjusted_p[idx] = max(adjusted_p[idx], adjusted_p[prev_idx])
+    # Enforce monotonicity: p_(i) must be <= p_(i+1)
+    # Use np.maximum.accumulate for efficient cumulative max
+    monotonic_adjusted = np.maximum.accumulate(raw_adjusted)
+
+    # Map back to original indices
+    for i, idx in enumerate(sorted_indices):
+        adjusted_p[idx] = monotonic_adjusted[i]
 
     for i, p in enumerate(adjusted_p):
         significant[i] = p < alpha
@@ -634,6 +676,18 @@ def benjamini_hochberg_correction(p_values: List[float], alpha: float = 0.05) ->
     more appropriate for exploratory analyses with many comparisons.
     """
     n = len(p_values)
+
+    # Guard against empty input to avoid division-by-zero in critical value computation
+    if n == 0:
+        return {
+            "method": "benjamini_hochberg",
+            "original_p_values": [],
+            "adjusted_p_values": [],
+            "fdr_level": alpha,
+            "significant": [],
+            "n_comparisons": 0,
+            "n_discoveries": 0,
+        }
     sorted_indices = np.argsort(p_values)
     sorted_p = np.array(p_values)[sorted_indices]
 
@@ -862,8 +916,24 @@ def test_superiority_hypothesis(
         effect = np.mean(diff)
         ci = bootstrap_ci(diff)
 
-        # One-sided test
-        test_result = paired_ttest(treatment, control, alternative='greater')
+        # One-sided test; enforce minimum sample size to avoid invalid p-values
+        if len(diff) < 2:
+            test_result = StatisticalResult(
+                test_name="paired_ttest",
+                statistic=np.nan,
+                p_value=1.0,
+                effect_size=np.nan,
+                effect_size_name="Cohen's d",
+                ci_low=np.nan,
+                ci_high=np.nan,
+                n1=len(diff),
+                n2=len(diff),
+                significant_at_05=False,
+                significant_at_01=False,
+                interpretation="insufficient data",
+            )
+        else:
+            test_result = paired_ttest(treatment, control, alternative='greater')
     else:
         effect = np.mean(treatment) - np.mean(control)
         ci = bootstrap_difference_ci(treatment, control)
@@ -875,7 +945,7 @@ def test_superiority_hypothesis(
     # 3. p < 0.05
     passed = (
         effect > margin and
-        ci.ci_low > 0 and
+        ci.ci_low > margin and
         test_result.significant_at_05
     )
 
@@ -911,13 +981,11 @@ def test_threshold_hypothesis(
     ci = bootstrap_ci(values)
 
     if direction == "greater":
-        # One-sample t-test against threshold
-        t_stat, p_value = stats.ttest_1samp(values, threshold)
-        p_value = p_value / 2 if t_stat > 0 else 1 - p_value / 2  # One-sided
+        # One-sample t-test against threshold (one-sided)
+        t_stat, p_value = stats.ttest_1samp(values, threshold, alternative='greater')
         passed = ci.estimate > threshold and ci.ci_low > threshold * 0.9  # Allow 10% slack
     else:
-        t_stat, p_value = stats.ttest_1samp(values, threshold)
-        p_value = p_value / 2 if t_stat < 0 else 1 - p_value / 2
+        t_stat, p_value = stats.ttest_1samp(values, threshold, alternative='less')
         passed = ci.estimate < threshold and ci.ci_high < threshold * 1.1
 
     return HypothesisTestResult(
